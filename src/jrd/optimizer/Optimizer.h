@@ -511,7 +511,8 @@ enum segmentScanType {
 	segmentScanEqual,
 	segmentScanEquivalent,
 	segmentScanMissing,
-	segmentScanStarting
+	segmentScanStarting,
+	segmentScanList
 };
 
 typedef Firebird::HalfStaticArray<BoolExprNode*, OPT_STATIC_ITEMS> MatchedBooleanList;
@@ -525,6 +526,7 @@ struct IndexScratchSegment
 	explicit IndexScratchSegment(MemoryPool& p, const IndexScratchSegment& other)
 		: lowerValue(other.lowerValue),
 		  upperValue(other.upperValue),
+		  matchValues(other.matchValues),
 		  excludeLower(other.excludeLower),
 		  excludeUpper(other.excludeUpper),
 		  scope(other.scope),
@@ -534,6 +536,7 @@ struct IndexScratchSegment
 
 	ValueExprNode* lowerValue = nullptr;		// lower bound on index value
 	ValueExprNode* upperValue = nullptr;		// upper bound on index value
+	ValueListNode* matchValues = nullptr;		// values to match
 	bool excludeLower = false;					// exclude lower bound value from scan
 	bool excludeUpper = false;					// exclude upper bound value from scan
 	unsigned scope = 0;							// highest scope level

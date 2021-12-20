@@ -45,6 +45,7 @@
 #include "../jrd/lck.h"
 #include "../jrd/cch.h"
 #include "../jrd/sort.h"
+#include "../jrd/val.h"
 #include "../common/gdsassert.h"
 #include "../jrd/btr_proto.h"
 #include "../jrd/cch_proto.h"
@@ -674,6 +675,76 @@ idx_e IndexKey::compose(Record* record)
 }
 
 
+// IndexScanListIterator class
+
+IndexScanListIterator::IndexScanListIterator(thread_db* tdbb,
+											 const IndexRetrieval* retrieval,
+											 const SortedValueList& sortedList)
+	: m_tdbb(tdbb), m_retrieval(retrieval),
+	  m_values(*tdbb->getDefaultPool(), sortedList.getCount()),
+	  m_iterator(m_values.begin())
+{
+	fb_assert(retrieval->irb_lower_count && retrieval->irb_upper_count);
+	fb_assert(retrieval->irb_lower_count == retrieval->irb_upper_count);
+
+	fb_assert(sortedList.hasData());
+
+	memset(&m_key, 0, sizeof(m_key));
+
+	if (retrieval->irb_generic & irb_descending)
+	{
+		for (auto iter = sortedList.end() - 1; iter >= sortedList.begin(); --iter)
+			m_values.add(iter->value);
+	}
+	else
+	{
+		for (const auto& item : sortedList)
+			m_values.add(item.value);
+	}
+
+	makeKey();
+}
+
+bool IndexScanListIterator::makeKey()
+{
+	const auto count = m_retrieval->irb_lower_count;
+	// Set up upper bound
+	auto values = m_retrieval->irb_value;
+	values[count - 1] = const_cast<ValueExprNode*>(*m_iterator);
+	// Set up lower bound
+	values += m_retrieval->irb_desc.idx_count;
+	values[count - 1] = const_cast<ValueExprNode*>(*m_iterator);
+
+	// Evaluate the key
+
+	temporary_key tempKey;
+
+	const USHORT keyType =
+		(m_retrieval->irb_desc.idx_flags & idx_unique) ? INTL_KEY_UNIQUE : INTL_KEY_SORT;
+
+	const idx_e errorCode =
+		BTR_make_key(m_tdbb, count, values, &m_retrieval->irb_desc, &tempKey, keyType);
+
+	if (errorCode != idx_e_ok)
+	{
+		index_desc temp_idx = m_retrieval->irb_desc;
+		IndexErrorContext context(m_retrieval->irb_relation, &temp_idx);
+		context.raise(m_tdbb, errorCode, NULL);
+	}
+
+	// If the key is equal to the prior one, indicate it to be skipped by the caller
+
+	if (tempKey.key_length == m_key.key_length &&
+		!memcmp(tempKey.key_data, m_key.key_data, m_key.key_length))
+	{
+		return false;
+	}
+
+	m_key = tempKey;
+	return true;
+}
+
+
 void BTR_all(thread_db* tdbb, jrd_rel* relation, IndexDescList& idxList, RelationPages* relPages)
 {
 /**************************************
@@ -1029,6 +1100,19 @@ void BTR_evaluate(thread_db* tdbb, const IndexRetrieval* retrieval, RecordBitmap
 	upperKey.key_flags = 0;
 	upperKey.key_length = 0;
 
+	AutoPtr<IndexScanListIterator> iterator;
+
+	if (const auto listNode = retrieval->irb_list)
+	{
+		AutoPtr<SortedValueList> sortedList(listNode->sort(tdbb, tdbb->getRequest()));
+
+		iterator = FB_NEW_POOL(*tdbb->getDefaultPool())
+			IndexScanListIterator(tdbb, retrieval, *sortedList);
+
+		if (listNode->nodFlags & ExprNode::FLAG_INVARIANT)
+			sortedList.release();
+	}
+
 	temporary_key* lower = &lowerKey;
 	temporary_key* upper = &upperKey;
 	bool first = true;
@@ -1076,9 +1160,43 @@ void BTR_evaluate(thread_db* tdbb, const IndexRetrieval* retrieval, RecordBitmap
 			skipLowerKey = false;
 		}
 
-		// if there is an upper bound, scan the index pages looking for it
+		if (iterator)
+		{
+			// If we have a key list to match, proceed through the keys
+			// updating lower/upper bounds during the process
+			fb_assert(!skipLowerKey);
+
+			for (bool updateLower = false; iterator->hasData(); ++(*iterator), updateLower = true)
+			{
+				if (updateLower)
+				{
+					const auto key = iterator->getKey();
+					lower = upper = &key; // update both bounds with the new lookup key
+					prefix = key.key_length; // for lower == upper, the whole key is a common prefix
+
+					while (!(pointer = find_node_start_point(page, lower, 0, &prefix,
+						idx.idx_flags & idx_descending, (retrieval->irb_generic & (irb_starting | irb_partial)))))
+					{
+						page = (btree_page*) CCH_HANDOFF(tdbb, &window, page->btr_sibling, LCK_read, pag_index);
+					}
+
+					prefix = IndexNode::computePrefix(upper->key_data, upper->key_length,
+													  lower->key_data, lower->key_length);
+				}
+
+				while (scan(tdbb, pointer, bitmap, bitmap_and, &idx, retrieval,
+							prefix, upper, skipLowerKey, lower))
+				{
+					page = (btree_page*) CCH_HANDOFF(tdbb, &window, page->btr_sibling, LCK_read, pag_index);
+					pointer = page->btr_nodes + page->btr_jump_size;
+					prefix = 0;
+				}
+			}
+		}
+
 		if (retrieval->irb_upper_count)
 		{
+			// if there is an upper bound, scan the index pages looking for it
 			while (scan(tdbb, pointer, bitmap, bitmap_and, &idx, retrieval, prefix, upper,
 						skipLowerKey, *lower))
 			{

@@ -161,6 +161,7 @@ void RecordSource::printInversion(thread_db* tdbb, const InversionNode* inversio
 
 				const bool fullscan = (maxSegs == 0);
 				const bool unique = uniqueIdx && equality && (minSegs == segCount);
+				const bool list = (retrieval->irb_list != nullptr);
 
 				string bounds;
 				if (!unique && !fullscan)
@@ -194,7 +195,7 @@ void RecordSource::printInversion(thread_db* tdbb, const InversionNode* inversio
 				}
 
 				plan += "Index " + printName(tdbb, indexName.c_str()) +
-					(fullscan ? " Full" : unique ? " Unique" : " Range") + " Scan" + bounds;
+					(fullscan ? " Full" : unique ? " Unique" : list ? " List" : " Range") + " Scan" + bounds;
 			}
 			else
 			{

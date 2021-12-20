@@ -84,8 +84,11 @@ public:
 		DFLAG_ANSI_ANY
 	};
 
-	ComparativeBoolNode(MemoryPool& pool, UCHAR aBlrOp, ValueExprNode* aArg1 = NULL,
-		ValueExprNode* aArg2 = NULL, ValueExprNode* aArg3 = NULL);
+	ComparativeBoolNode(MemoryPool& pool, UCHAR aBlrOp, ValueExprNode* aArg1 = nullptr,
+		ValueExprNode* aArg2 = nullptr, ValueExprNode* aArg3 = nullptr);
+
+	ComparativeBoolNode(MemoryPool& pool, UCHAR aBlrOp, ValueExprNode* aArg1,
+		DsqlFlag aDsqlFlag, ExprNode* aSpecialArg);
 
 	static DmlNode* parse(thread_db* tdbb, MemoryPool& pool, CompilerScratch* csb, const UCHAR blrOp);
 
@@ -135,6 +138,41 @@ public:
 	NestConst<ValueExprNode> arg2;
 	NestConst<ValueExprNode> arg3;
 	NestConst<ExprNode> dsqlSpecialArg;	// list or select expression
+};
+
+
+class InListBoolNode : public TypedNode<BoolExprNode, ExprNode::TYPE_IN_LIST_BOOL>
+{
+	const static UCHAR blrOp = blr_in_list;
+
+public:
+	InListBoolNode(MemoryPool& pool, ValueExprNode* aArg = nullptr, ValueListNode* aList = nullptr);
+
+	static DmlNode* parse(thread_db* tdbb, MemoryPool& pool, CompilerScratch* csb, const UCHAR blrOp);
+
+	virtual void getChildren(NodeRefsHolder& holder, bool dsql) const
+	{
+		BoolExprNode::getChildren(holder, dsql);
+
+		holder.add(arg);
+		holder.add(list);
+	}
+
+	virtual Firebird::string internalPrint(NodePrinter& printer) const;
+	virtual BoolExprNode* dsqlPass(DsqlCompilerScratch* dsqlScratch);
+	virtual void genBlr(DsqlCompilerScratch* dsqlScratch);
+
+	virtual BoolExprNode* copy(thread_db* tdbb, NodeCopier& copier) const;
+	virtual bool dsqlMatch(DsqlCompilerScratch* dsqlScratch, const ExprNode* other, bool ignoreMapCast) const;
+	virtual bool sameAs(const ExprNode* other, bool ignoreStreams) const;
+	virtual BoolExprNode* pass1(thread_db* tdbb, CompilerScratch* csb);
+	virtual void pass2Boolean1(thread_db* tdbb, CompilerScratch* csb);
+	virtual void pass2Boolean2(thread_db* tdbb, CompilerScratch* csb);
+	virtual bool execute(thread_db* tdbb, Request* request) const;
+
+public:
+	NestConst<ValueExprNode> arg;
+	NestConst<ValueListNode> list;
 };
 
 

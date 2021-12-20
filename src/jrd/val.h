@@ -57,6 +57,26 @@ class ArrayField;
 class blb;
 class Request;
 class jrd_tra;
+class ValueExprNode;
+
+struct SortValueItem
+{
+	SortValueItem(const ValueExprNode* val, const dsc* d)
+		: value(val), desc(d)
+	{}
+
+	static int compare(const dsc* desc1, const dsc* desc2);
+
+	bool operator>(const SortValueItem& other) const
+	{
+		return (compare(desc, other.desc) > 0);
+	}
+
+	const ValueExprNode* value;
+	const dsc* desc;
+};
+
+typedef Firebird::SortedArray<SortValueItem> SortedValueList;
 
 // Various structures in the impure area
 
@@ -109,6 +129,7 @@ struct impure_value
 		// Pre-compiled invariant object for pattern matcher functions
 		Jrd::PatternMatcher* vlu_invariant;
 		PatternMatcherCache* vlu_patternMatcherCache;
+		SortedValueList* vlu_sortedList;
 	} vlu_misc;
 
 	void make_long(const SLONG val, const signed char scale = 0);

@@ -159,9 +159,7 @@ namespace
 		for (ExprNode** node = csb->csb_current_nodes.end() - 1;
 			 node >= csb->csb_current_nodes.begin(); --node)
 		{
-			RseNode* const rseNode = nodeAs<RseNode>(*node);
-
-			if (rseNode)
+			if (const auto rseNode = nodeAs<RseNode>(*node))
 			{
 				if (rseNode->containsStream(stream))
 					break;
@@ -189,6 +187,15 @@ static SINT64 getDayFraction(const dsc* d);
 static SINT64 getTimeStampToIscTicks(thread_db* tdbb, const dsc* d);
 static bool isDateAndTime(const dsc& d1, const dsc& d2);
 static void setParameterInfo(dsql_par* parameter, const dsql_ctx* context);
+
+
+//--------------------
+
+
+int SortValueItem::compare(const dsc* desc1, const dsc* desc2)
+{
+	return MOV_compare(JRD_get_thread_data(), desc1, desc2);
+}
 
 
 //--------------------
@@ -446,6 +453,28 @@ Firebird::string ValueListNode::internalPrint(NodePrinter& printer) const
 	NODE_PRINT(printer, items);
 
 	return "ValueListNode";
+}
+
+
+void ValueListNode::getDesc(thread_db* tdbb, CompilerScratch* csb, dsc* desc)
+{
+	Array<dsc> descs;
+	descs.resize(items.getCount());
+
+	unsigned i = 0;
+	Array<const dsc*> descPtrs;
+	descPtrs.resize(items.getCount());
+
+	for (auto& value : items)
+	{
+		value->getDesc(tdbb, csb, &descs[i]);
+		descPtrs[i] = &descs[i];
+		++i;
+	}
+
+	DataTypeUtil(tdbb).makeFromList(desc, "IN LIST", descPtrs.getCount(), descPtrs.begin());
+
+	desc->setNullable(true);
 }
 
 

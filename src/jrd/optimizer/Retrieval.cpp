@@ -832,6 +832,7 @@ void Retrieval::getInversionCandidates(InversionCandidateList& inversions,
 		{
 			matches.assign(scratch.matches);
 			scratch.selectivity = idx->idx_fraction;
+			double listSelectivity = 0.0;
 
 			bool unique = false;
 
@@ -947,6 +948,14 @@ void Retrieval::getInversionCandidates(InversionCandidateList& inversions,
 							factor = REDUCE_SELECTIVITY_FACTOR_STARTING;
 							break;
 
+						case segmentScanList:
+							scratch.lowerCount++;
+							scratch.upperCount++;
+							selectivity = idx->idx_rpt[j].idx_selectivity;
+							factor = REDUCE_SELECTIVITY_FACTOR_OTHER;
+							listSelectivity = selectivity * segment.matchValues->items.getCount();
+							break;
+
 						default:
 							fb_assert(segment.scanType == segmentScanNone);
 							break;
@@ -976,7 +985,7 @@ void Retrieval::getInversionCandidates(InversionCandidateList& inversions,
 				// For an unique index, estimate the selectivity via the stream cardinality.
 				// For a non-unique one, assume 1/10 of the maximum selectivity, so that
 				// at least some indexes could be chosen by the optimizer.
-				double selectivity = scratch.selectivity;
+				double selectivity = listSelectivity ? listSelectivity : scratch.selectivity;
 
 				if (selectivity <= 0)
 					selectivity = unique ? 1 / cardinality : DEFAULT_SELECTIVITY;
@@ -1062,6 +1071,45 @@ InversionNode* Retrieval::makeIndexScanNode(IndexScratch* indexScratch) const
 	if (!createIndexScanNodes)
 		return nullptr;
 
+	// For the IN <list> scan, estimate its cost in advance and transform
+	// the scan to multiple lookups (bitmap-based) if it looks cheaper.
+
+	if (indexScratch->lowerCount &&
+		indexScratch->lowerCount == indexScratch->upperCount)
+	{
+		const auto lastSegmentIndex = indexScratch->lowerCount - 1;
+		auto& segment = indexScratch->segments[lastSegmentIndex];
+
+		if (const auto list = segment.matchValues)
+		{
+			fb_assert(segment.scanType == segmentScanList);
+
+			const auto count = list->items.getCount();
+			fb_assert(count);
+
+			const auto lookupCost = count * DEFAULT_INDEX_COST;
+			const auto scanCost = DEFAULT_INDEX_COST + indexScratch->selectivity * indexScratch->cardinality;
+
+			if (lookupCost < scanCost)
+			{
+				segment.scanType = segmentScanEqual;
+				segment.matchValues = nullptr;
+
+				InversionNode* listInversion = nullptr;
+
+				for (auto value : list->items)
+				{
+					segment.lowerValue = value;
+					segment.upperValue = value;
+					const auto inversion = makeIndexScanNode(indexScratch);
+					listInversion = composeInversion(listInversion, inversion, InversionNode::TYPE_IN);
+				}
+
+				return listInversion;
+			}
+		}
+	}
+
 	index_desc* const idx = indexScratch->index;
 
 	// Check whether this is during a compile or during a SET INDEX operation
@@ -1130,13 +1178,20 @@ InversionNode* Retrieval::makeIndexScanNode(IndexScratch* indexScratch) const
 		if (ignoreNullsOnScan && !(idx->idx_runtime_flags & idx_navigate))
 			retrieval->irb_generic |= irb_ignore_null_value_key;
 
-		if (segments[count - 1].scanType == segmentScanStarting)
-			retrieval->irb_generic |= irb_starting;
+		const auto& lastSegment = segments[count - 1];
 
-		if (segments[count - 1].excludeLower)
+		if (lastSegment.scanType == segmentScanStarting)
+			retrieval->irb_generic |= irb_starting;
+		else if (lastSegment.scanType == segmentScanList)
+		{
+			retrieval->irb_list = lastSegment.matchValues;
+			fb_assert(retrieval->irb_list);
+		}
+
+		if (lastSegment.excludeLower)
 			retrieval->irb_generic |= irb_exclude_lower;
 
-		if (segments[count - 1].excludeUpper)
+		if (lastSegment.excludeUpper)
 			retrieval->irb_generic |= irb_exclude_upper;
 	}
 
@@ -1546,26 +1601,34 @@ bool Retrieval::matchBoolean(IndexScratch* indexScratch,
 
 	const auto cmpNode = nodeAs<ComparativeBoolNode>(boolean);
 	const auto missingNode = nodeAs<MissingBoolNode>(boolean);
+	const auto listNode = nodeAs<InListBoolNode>(boolean);
 	const auto notNode = nodeAs<NotBoolNode>(boolean);
 	const auto rseNode = nodeAs<RseBoolNode>(boolean);
 	bool forward = true;
 	ValueExprNode* value = nullptr;
 	ValueExprNode* match = nullptr;
+	ValueListNode* list = nullptr;
 
 	if (cmpNode)
 	{
 		match = cmpNode->arg1;
 		value = cmpNode->arg2;
 	}
+	else if (listNode)
+	{
+		match = listNode->arg;
+		list = listNode->list;
+	}
 	else if (missingNode)
 		match = missingNode->arg;
-	else if (notNode || rseNode)
-		return false;
 	else
 	{
-		fb_assert(false);
+		fb_assert(notNode || rseNode);
 		return false;
 	}
+
+	if (list && !list->computable(csb, stream, false))
+		return false;
 
 	ValueExprNode* value2 = (cmpNode && cmpNode->blrOp == blr_between) ?
 		cmpNode->arg3 : nullptr;
@@ -1611,9 +1674,7 @@ bool Retrieval::matchBoolean(IndexScratch* indexScratch,
 			fieldNode->fieldStream != stream ||
 			(value && !value->computable(csb, stream, false)))
 		{
-			ValueExprNode* temp = match;
-			match = value;
-			value = temp;
+			std::swap(match, value);
 
 			if ((!match || !(fieldNode = nodeAs<FieldNode>(match))) ||
 				fieldNode->fieldStream != stream ||
@@ -1633,10 +1694,10 @@ bool Retrieval::matchBoolean(IndexScratch* indexScratch,
 
 	dsc matchDesc, valueDesc;
 
-	if (value)
+	if (const auto node = list ? list->items.front().getObject() : value)
 	{
 		match->getDesc(tdbb, csb, &matchDesc);
-		value->getDesc(tdbb, csb, &valueDesc);
+		node->getDesc(tdbb, csb, &valueDesc);
 
 		if (!BTR_types_comparable(matchDesc, valueDesc))
 			return false;
@@ -1739,7 +1800,8 @@ bool Retrieval::matchBoolean(IndexScratch* indexScratch,
 					segment->matches.add(boolean);
 					if (!((segment->scanType == segmentScanEqual) ||
 						(segment->scanType == segmentScanEquivalent) ||
-						(segment->scanType == segmentScanBetween)))
+						(segment->scanType == segmentScanBetween) ||
+						(segment->scanType == segmentScanList)))
 					{
 						if (forward != isDesc) // (forward && !isDesc || !forward && isDesc)
 							segment->excludeLower = excludeBound;
@@ -1770,7 +1832,8 @@ bool Retrieval::matchBoolean(IndexScratch* indexScratch,
 					segment->matches.add(boolean);
 					if (!((segment->scanType == segmentScanEqual) ||
 						(segment->scanType == segmentScanEquivalent) ||
-						(segment->scanType == segmentScanBetween)))
+						(segment->scanType == segmentScanBetween) ||
+						(segment->scanType == segmentScanList)))
 					{
 						if (forward != isDesc)
 							segment->excludeUpper = excludeBound;
@@ -1816,6 +1879,21 @@ bool Retrieval::matchBoolean(IndexScratch* indexScratch,
 					return false;
 			}
 		}
+		else if (listNode)
+		{
+			segment->matches.add(boolean);
+			if (!((segment->scanType == segmentScanEqual) ||
+				(segment->scanType == segmentScanEquivalent)))
+			{
+				segment->lowerValue = segment->upperValue = nullptr;
+				for (auto& item : list)
+					item = injectCast(csb, item, cast, matchDesc);
+				segment->matchValues = list;
+				segment->scanType = segmentScanList;
+				segment->excludeLower = false;
+				segment->excludeUpper = false;
+			}
+		}
 		else if (missingNode)
 		{
 			segment->matches.add(boolean);
@@ -1859,44 +1937,57 @@ InversionCandidate* Retrieval::matchDbKey(BoolExprNode* boolean) const
 	// If this isn't an equality, it isn't even interesting
 
 	const auto cmpNode = nodeAs<ComparativeBoolNode>(boolean);
+	const auto listNode = nodeAs<InListBoolNode>(boolean);
 
-	if (!cmpNode)
-		return nullptr;
-
-	switch (cmpNode->blrOp)
+	if (cmpNode)
 	{
-		case blr_equiv:
-		case blr_eql:
-		case blr_gtr:
-		case blr_geq:
-		case blr_lss:
-		case blr_leq:
-		case blr_between:
-			break;
+		switch (cmpNode->blrOp)
+		{
+			case blr_equiv:
+			case blr_eql:
+			case blr_gtr:
+			case blr_geq:
+			case blr_lss:
+			case blr_leq:
+			case blr_between:
+				break;
 
-		default:
-			return nullptr;
+			default:
+				return nullptr;
+		}
 	}
+	else if (!listNode)
+		return NULL;
 
 	// Find the side of the equality that is potentially a dbkey.
 	// If neither, make the obvious deduction.
 
 	SLONG n = 0;
 	int dbkeyArg = 1;
-	auto dbkey = findDbKey(cmpNode->arg1, &n);
+	ValueExprNode* dbkey = nullptr;
 
-	if (!dbkey)
+	if (cmpNode)
 	{
-		n = 0;
-		dbkeyArg = 2;
-		dbkey = findDbKey(cmpNode->arg2, &n);
+		dbkey = findDbKey(cmpNode->arg1, &n);
+
+		if (!dbkey)
+		{
+			n = 0;
+			dbkeyArg = 2;
+			dbkey = findDbKey(cmpNode->arg2, &n);
+		}
+
+		if (!dbkey && (cmpNode->blrOp == blr_between))
+		{
+			n = 0;
+			dbkeyArg = 3;
+			dbkey = findDbKey(cmpNode->arg3, &n);
+		}
 	}
-
-	if (!dbkey && (cmpNode->blrOp == blr_between))
+	else
 	{
-		n = 0;
-		dbkeyArg = 3;
-		dbkey = findDbKey(cmpNode->arg3, &n);
+		fb_assert(listNode);
+		dbkey = findDbKey(listNode->arg, &n);
 	}
 
 	if (!dbkey)
@@ -1918,61 +2009,72 @@ InversionCandidate* Retrieval::matchDbKey(BoolExprNode* boolean) const
 
 	ValueExprNode* lower = nullptr;
 	ValueExprNode* upper = nullptr;
+	ValueListNode* list = listNode ? listNode->list : nullptr;
 
-	switch (cmpNode->blrOp)
+	if (cmpNode)
 	{
-	case blr_eql:
-	case blr_equiv:
-		unique = true;
-		selectivity = 1 / cardinality;
-		lower = upper = (dbkeyArg == 1) ? cmpNode->arg2 : cmpNode->arg1;
-		break;
-
-	case blr_gtr:
-	case blr_geq:
-		selectivity = REDUCE_SELECTIVITY_FACTOR_GREATER;
-		if (dbkeyArg == 1)
-			lower = cmpNode->arg2;	// dbkey > arg2
-		else
-			upper = cmpNode->arg1;	// arg1 < dbkey
-		break;
-
-	case blr_lss:
-	case blr_leq:
-		selectivity = REDUCE_SELECTIVITY_FACTOR_LESS;
-		if (dbkeyArg == 1)
-			upper = cmpNode->arg2;	// dbkey < arg2
-		else
-			lower = cmpNode->arg1;	// arg1 < dbkey
-		break;
-
-	case blr_between:
-		if (dbkeyArg == 1)			// dbkey between arg2 and arg3
+		switch (cmpNode->blrOp)
 		{
-			selectivity = REDUCE_SELECTIVITY_FACTOR_BETWEEN;
-			lower = cmpNode->arg2;
-			upper = cmpNode->arg3;
-		}
-		else if (dbkeyArg == 2)		// arg1 between dbkey and arg3, or dbkey <= arg1 and arg1 <= arg3
-		{
-			selectivity = REDUCE_SELECTIVITY_FACTOR_LESS;
-			upper = cmpNode->arg1;
-		}
-		else if (dbkeyArg == 3)		// arg1 between arg2 and dbkey, or arg2 <= arg1 and arg1 <= dbkey
-		{
+		case blr_eql:
+		case blr_equiv:
+			unique = true;
+			selectivity = 1 / cardinality;
+			lower = upper = (dbkeyArg == 1) ? cmpNode->arg2 : cmpNode->arg1;
+			break;
+
+		case blr_gtr:
+		case blr_geq:
 			selectivity = REDUCE_SELECTIVITY_FACTOR_GREATER;
-			lower = cmpNode->arg1;
-		}
-		break;
+			if (dbkeyArg == 1)
+				lower = cmpNode->arg2;	// dbkey > arg2
+			else
+				upper = cmpNode->arg1;	// arg1 < dbkey
+			break;
 
-	default:
-		return nullptr;
+		case blr_lss:
+		case blr_leq:
+			selectivity = REDUCE_SELECTIVITY_FACTOR_LESS;
+			if (dbkeyArg == 1)
+				upper = cmpNode->arg2;	// dbkey < arg2
+			else
+				lower = cmpNode->arg1;	// arg1 < dbkey
+			break;
+
+		case blr_between:
+			if (dbkeyArg == 1)			// dbkey between arg2 and arg3
+			{
+				selectivity = REDUCE_SELECTIVITY_FACTOR_BETWEEN;
+				lower = cmpNode->arg2;
+				upper = cmpNode->arg3;
+			}
+			else if (dbkeyArg == 2)		// arg1 between dbkey and arg3, or dbkey <= arg1 and arg1 <= arg3
+			{
+				selectivity = REDUCE_SELECTIVITY_FACTOR_LESS;
+				upper = cmpNode->arg1;
+			}
+			else if (dbkeyArg == 3)		// arg1 between arg2 and dbkey, or arg2 <= arg1 and arg1 <= dbkey
+			{
+				selectivity = REDUCE_SELECTIVITY_FACTOR_GREATER;
+				lower = cmpNode->arg1;
+			}
+			break;
+
+		default:
+			fb_assert(false);
+		}
+	}
+	else
+	{
+		selectivity = list->items.getCount() / cardinality;
 	}
 
 	if (lower && !lower->computable(csb, stream, false))
 		return nullptr;
 
 	if (upper && !upper->computable(csb, stream, false))
+		return nullptr;
+
+	if (list && !list->computable(csb, stream, false))
 		return nullptr;
 
 	const auto invCandidate = FB_NEW_POOL(getPool()) InversionCandidate(getPool());
@@ -1985,7 +2087,20 @@ InversionCandidate* Retrieval::matchDbKey(BoolExprNode* boolean) const
 
 	if (createIndexScanNodes)
 	{
-		if (unique)
+		if (list)
+		{
+			InversionNode* listInversion = nullptr;
+
+			for (auto value : list->items)
+			{
+				const auto inversion = FB_NEW_POOL(getPool()) InversionNode(value, n);
+				inversion->impure = csb->allocImpure<impure_inversion>();
+				listInversion = composeInversion(listInversion, inversion, InversionNode::TYPE_IN);
+			}
+
+			invCandidate->inversion = listInversion;
+		}
+		else if (unique)
 		{
 			fb_assert(lower == upper);
 

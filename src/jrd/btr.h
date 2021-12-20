@@ -50,6 +50,7 @@ class BtrPageGCLock;
 class Sort;
 class PartitionedSort;
 struct sort_key_def;
+class ValueListNode;
 
 // Index descriptor block -- used to hold info from index root page
 
@@ -190,7 +191,7 @@ public:
 	IndexRetrieval(jrd_rel* relation, const index_desc* idx, USHORT count, temporary_key* key)
 		: irb_relation(relation), irb_index(idx->idx_id),
 		  irb_generic(0), irb_lower_count(count), irb_upper_count(count), irb_key(key),
-		  irb_name(NULL), irb_value(NULL)
+		  irb_name(nullptr), irb_value(nullptr), irb_list(nullptr)
 	{
 		memcpy(&irb_desc, idx, sizeof(irb_desc));
 	}
@@ -200,7 +201,8 @@ public:
 		: irb_relation(relation), irb_index(idx->idx_id),
 		  irb_generic(0), irb_lower_count(0), irb_upper_count(0), irb_key(NULL),
 		  irb_name(FB_NEW_POOL(pool) MetaName(name)),
-		  irb_value(FB_NEW_POOL(pool) ValueExprNode*[idx->idx_count * 2])
+		  irb_value(FB_NEW_POOL(pool) ValueExprNode*[idx->idx_count * 2]),
+		  irb_list(nullptr)
 	{
 		memcpy(&irb_desc, idx, sizeof(irb_desc));
 	}
@@ -218,8 +220,9 @@ public:
 	USHORT irb_lower_count;			// Number of segments for retrieval
 	USHORT irb_upper_count;			// Number of segments for retrieval
 	temporary_key* irb_key;			// Key for equality retrieval
-	MetaName* irb_name;	// Index name
-	ValueExprNode** irb_value;
+	MetaName* irb_name;				// Index name
+	ValueExprNode** irb_value;		// Matching value
+	ValueListNode* irb_list;		// Matching values list
 };
 
 // Flag values for irb_generic
@@ -465,6 +468,44 @@ private:
 	temporary_key m_key;
 	AutoIndexExpression& m_expression;
 	AutoIndexExpression m_localExpression;
+};
+
+// List scan iterator
+
+class IndexScanListIterator
+{
+public:
+	IndexScanListIterator(thread_db* tdbb,
+						  const IndexRetrieval* retrieval,
+						  const SortedValueList& sortedList);
+
+	bool hasData() const
+	{
+		return (m_iterator && m_iterator < m_values.end());
+	}
+
+	const temporary_key& getKey() const
+	{
+		return m_key;
+	}
+
+	void operator++()
+	{
+		fb_assert(m_iterator);
+
+		while (++m_iterator < m_values.end())
+		{
+			if (makeKey())
+				break;
+		}
+	}
+
+	const IndexRetrieval* const m_retrieval;
+	Firebird::HalfStaticArray<const ValueExprNode*, 64> m_values;
+	const ValueExprNode* const* m_iterator;
+	temporary_key m_key;
+
+	bool makeKey();
 };
 
 } //namespace Jrd
