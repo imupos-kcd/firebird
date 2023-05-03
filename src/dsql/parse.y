@@ -8553,10 +8553,19 @@ argument_list_opt
 %type <namedArguments> argument_list
 argument_list
 	: named_argument_list
-		{ $$ = $1; }
 	| value_list
 		{
 			$$ = newNode<NonPooledPair<ObjectsArray<MetaName>*, ValueListNode*>>();
+			$$->second = $1;
+		}
+	| value_list ',' named_argument_list
+		{
+			$$ = $3;
+
+			for (auto item : $$->second->items)
+				$1->add(item);
+
+			delete $$->second;
 			$$->second = $1;
 		}
 	;
