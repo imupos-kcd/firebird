@@ -12955,12 +12955,15 @@ DmlNode* UdfCallNode::parse(thread_db* tdbb, MemoryPool& pool, CompilerScratch* 
 
 	for (auto& parameter : node->function->getInputFields())
 	{
-		if (const auto argValue = argsByName.get(parameter->prm_name))
+		const auto argValue = argsByName.get(parameter->prm_name);
+
+		if (argValue)
 		{
 			*argIt = *argValue;
 			argsByName.remove(parameter->prm_name);
 		}
-		else
+
+		if (!argValue || !*argValue)
 		{
 			if (parameter->prm_default_value)
 				*argIt = CMP_clone_node(tdbb, csb, parameter->prm_default_value);
@@ -13053,7 +13056,7 @@ void UdfCallNode::genBlr(DsqlCompilerScratch* dsqlScratch)
 		dsqlScratch->appendUShort(args->items.getCount());
 
 		for (auto& arg : args->items)
-			GEN_expr(dsqlScratch, arg);
+			GEN_arg(dsqlScratch, arg);
 
 		dsqlScratch->appendUChar(blr_end);
 
@@ -13072,7 +13075,7 @@ void UdfCallNode::genBlr(DsqlCompilerScratch* dsqlScratch)
 	dsqlScratch->appendUChar(args->items.getCount());
 
 	for (auto& arg : args->items)
-		GEN_expr(dsqlScratch, arg);
+		GEN_arg(dsqlScratch, arg);
 }
 
 void UdfCallNode::make(DsqlCompilerScratch* /*dsqlScratch*/, dsc* desc)

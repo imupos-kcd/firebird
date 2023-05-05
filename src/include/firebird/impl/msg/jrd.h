@@ -966,5 +966,5 @@ FB_IMPL_MSG(JRD, 964, bad_temp_blob_id, -402, "42", "000", "Invalid temporary BL
 FB_IMPL_MSG(JRD, 965, ods_upgrade_err, -901, "HY", "000", "ODS upgrade failed while adding new system %s")
 FB_IMPL_MSG(JRD, 966, bad_par_workers, -924, "HY", "000", "Wrong parallel workers value @1, valid range are from 1 to @2")
 FB_IMPL_MSG(JRD, 967, param_not_exist, -170, "07", "001", "Parameter @1 does not exist")
-FB_IMPL_MSG(JRD, 968, param_no_default_not_specified, -170, "07", "001", "Parameter @1 has no default value and was not specified")
+FB_IMPL_MSG(JRD, 968, param_no_default_not_specified, -170, "07", "001", "Parameter @1 has no default value and was not specified or was specified with DEFAULT")
 FB_IMPL_MSG(JRD, 969, param_multiple_assignments, -170, "07", "001", "Parameter @1 has multiple assignments")
