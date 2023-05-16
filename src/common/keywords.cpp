@@ -108,6 +108,7 @@ static const TOK tokens[] =
 	{TOK_BOTH, "BOTH", false},
 	{TOK_BREAK, "BREAK", true},
 	{TOK_BY, "BY", false},
+	{TOK_CALL, "CALL", false},
 	{TOK_CALLER, "CALLER", true},
 	{TOK_CASCADE, "CASCADE", true},
 	{TOK_CASE, "CASE", false},

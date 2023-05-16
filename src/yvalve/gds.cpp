@@ -4055,6 +4055,8 @@ static void blr_print_verb(gds_ctl* control, SSHORT level)
 				"in_args",
 				"out_arg_names",
 				"out_args",
+				"inout_arg_names",
+				"inout_args",
 				"context",
 				"alias"
 			};
@@ -4102,6 +4104,7 @@ static void blr_print_verb(gds_ctl* control, SSHORT level)
 
 					case blr_invsel_procedure_in_arg_names:
 					case blr_invsel_procedure_out_arg_names:
+					case blr_invsel_procedure_inout_arg_names:
 						n = blr_print_word(control);
 						offset = blr_print_line(control, offset);
 
@@ -4119,6 +4122,7 @@ static void blr_print_verb(gds_ctl* control, SSHORT level)
 
 					case blr_invsel_procedure_in_args:
 					case blr_invsel_procedure_out_args:
+					case blr_invsel_procedure_inout_args:
 						n = blr_print_word(control);
 						offset = blr_print_line(control, offset);
 
