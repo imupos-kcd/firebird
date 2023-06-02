@@ -695,6 +695,10 @@ using namespace Firebird;
 %token <metaNamePtr> UNICODE_CHAR
 %token <metaNamePtr> UNICODE_VAL
 
+// tokens added for Firebird 6.0
+
+%token <metaNamePtr> ANY_VALUE
+
 // precedence declarations for expression evaluation
 
 %left	OR
@@ -8004,6 +8008,8 @@ aggregate_function_prefix
 		{ $$ = newNode<RegrAggNode>(RegrAggNode::TYPE_REGR_SXY, $3, $5); }
 	| REGR_SYY '(' value ',' value ')'
 		{ $$ = newNode<RegrAggNode>(RegrAggNode::TYPE_REGR_SYY, $3, $5); }
+	| ANY_VALUE '(' distinct_noise value ')'
+		{ $$ = newNode<AnyValueAggNode>($4); }
 	;
 
 %type <aggNode> window_function
@@ -9199,6 +9205,8 @@ non_reserved_word
 	| TIMEZONE_NAME
 	| UNICODE_CHAR
 	| UNICODE_VAL
+	// added in FB 6.0
+	| ANY_VALUE
 	;
 
 %%

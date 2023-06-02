@@ -67,6 +67,7 @@ static const TOK tokens[] =
 	{TOK_ALL, "ALL", false},
 	{TOK_ALTER, "ALTER", false},
 	{TOK_ALWAYS, "ALWAYS", true},
+	{TOK_ANY_VALUE, "ANY_VALUE", true},
 	{TOK_AND, "AND", false},
 	{TOK_ANY, "ANY", false},
 	{TOK_AS, "AS", false},
