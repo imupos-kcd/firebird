@@ -197,6 +197,46 @@ int SortValueItem::compare(const dsc* desc1, const dsc* desc2)
 	return MOV_compare(JRD_get_thread_data(), desc1, desc2);
 }
 
+LookupValueList::LookupValueList(MemoryPool& pool, const ValueListNode* values, ULONG impure)
+	: m_values(pool, values->items.getCount()), m_impureOffset(impure)
+{
+	for (const auto item : values->items)
+		m_values.add(const_cast<ValueExprNode*>(item.getObject()));
+}
+
+TriState LookupValueList::find(thread_db* tdbb, Request* request, const ValueExprNode* value, const dsc* desc) const
+{
+	const auto impure = request->getImpure<impure_value>(m_impureOffset);
+	auto sortedList = impure->vlu_misc.vlu_sortedList;
+
+	if (!(impure->vlu_flags & VLU_computed))
+	{
+		delete impure->vlu_misc.vlu_sortedList;
+
+		sortedList = impure->vlu_misc.vlu_sortedList =
+			FB_NEW_POOL(*tdbb->getDefaultPool())
+				SortedValueList(*tdbb->getDefaultPool(), m_values.getCount());
+
+		sortedList->setSortMode(FB_ARRAY_SORT_MANUAL);
+
+		for (const auto value : m_values)
+		{
+			if (const auto valueDesc = EVL_expr(tdbb, request, value))
+				sortedList->add(SortValueItem(value, valueDesc));
+		}
+
+		sortedList->sort();
+
+		impure->vlu_flags |= VLU_computed;
+	}
+
+	if (sortedList->isEmpty())
+		return TriState();
+
+	const auto res = sortedList->exist(SortValueItem(value, desc));
+	return TriState(res);
+}
+
 
 //--------------------
 
@@ -458,11 +498,11 @@ Firebird::string ValueListNode::internalPrint(NodePrinter& printer) const
 
 void ValueListNode::getDesc(thread_db* tdbb, CompilerScratch* csb, dsc* desc)
 {
-	Array<dsc> descs;
+	HalfStaticArray<dsc, INITIAL_CAPACITY> descs;
 	descs.resize(items.getCount());
 
 	unsigned i = 0;
-	Array<const dsc*> descPtrs;
+	HalfStaticArray<const dsc*, INITIAL_CAPACITY> descPtrs;
 	descPtrs.resize(items.getCount());
 
 	for (auto& value : items)
@@ -472,7 +512,7 @@ void ValueListNode::getDesc(thread_db* tdbb, CompilerScratch* csb, dsc* desc)
 		++i;
 	}
 
-	DataTypeUtil(tdbb).makeFromList(desc, "IN LIST", descPtrs.getCount(), descPtrs.begin());
+	DataTypeUtil(tdbb).makeFromList(desc, "LIST", descPtrs.getCount(), descPtrs.begin());
 
 	desc->setNullable(true);
 }
@@ -12020,11 +12060,12 @@ ValueExprNode* SubstringSimilarNode::pass1(thread_db* tdbb, CompilerScratch* csb
 
 	// If there is no top-level RSE present and patterns are not constant, unmark node as invariant
 	// because it may be dependent on data or variables.
-	if ((nodFlags & FLAG_INVARIANT) && (!nodeIs<LiteralNode>(pattern) || !nodeIs<LiteralNode>(escape)))
+	if ((nodFlags & FLAG_INVARIANT) &&
+		(!nodeIs<LiteralNode>(pattern) || !nodeIs<LiteralNode>(escape)))
 	{
 		for (const auto& ctxNode : csb->csb_current_nodes)
 		{
-			if (nodeAs<RseNode>(ctxNode))
+			if (nodeIs<RseNode>(ctxNode))
 				return this;
 		}
 

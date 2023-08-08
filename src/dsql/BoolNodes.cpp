@@ -50,7 +50,7 @@ namespace Jrd {
 
 
 // Maximum members in "IN" list. For eg. SELECT * FROM T WHERE F IN (1, 2, 3, ...)
-// Switching beyond the 16-bit number would mean an incompatible BLR change.
+// Beware: raising the limit beyond the 16-bit boundaries would be an incompatible BLR change.
 static const unsigned MAX_MEMBER_LIST = MAX_USHORT;
 
 
@@ -588,18 +588,13 @@ BoolExprNode* ComparativeBoolNode::pass1(thread_db* tdbb, CompilerScratch* csb)
 		if ((nodFlags & FLAG_INVARIANT) &&
 			(!nodeIs<LiteralNode>(arg2) || (arg3 && !nodeIs<LiteralNode>(arg3))))
 		{
-			ExprNode* const* ctx_node;
-			ExprNode* const* end;
-
-			for (ctx_node = csb->csb_current_nodes.begin(), end = csb->csb_current_nodes.end();
-				 ctx_node != end; ++ctx_node)
+			for (const auto& ctxNode : csb->csb_current_nodes)
 			{
-				if (nodeAs<RseNode>(*ctx_node))
-					break;
+				if (nodeIs<RseNode>(ctxNode))
+					return this;
 			}
 
-			if (ctx_node >= end)
-				nodFlags &= ~FLAG_INVARIANT;
+			nodFlags &= ~FLAG_INVARIANT;
 		}
 	}
 
@@ -1240,9 +1235,13 @@ BoolExprNode* InListBoolNode::dsqlPass(DsqlCompilerScratch* dsqlScratch)
 			field->subType = listDesc.dsc_sub_type;
 			field->length = listDesc.dsc_length;
 			field->flags = (listDesc.dsc_flags & DSC_nullable) ? FLD_nullable : 0;
-			field->textType = listDesc.getTextType();
-			field->charSetId = listDesc.getCharSet();
-			field->collationId = listDesc.getCollation();
+
+			if (desc.isText() || desc.isBlob())
+			{
+				field->textType = listDesc.getTextType();
+				field->charSetId = listDesc.getCharSet();
+				field->collationId = listDesc.getCollation();
+			}
 
 			const auto castNode = FB_NEW_POOL(dsqlScratch->getPool())
 				CastNode(dsqlScratch->getPool(), item, field);
@@ -1309,7 +1308,7 @@ BoolExprNode* InListBoolNode::pass1(thread_db* tdbb, CompilerScratch* csb)
 {
 	doPass1(tdbb, csb, arg.getAddress());
 
-//	nodFlags |= FLAG_INVARIANT;
+	nodFlags |= FLAG_INVARIANT;
 	csb->csb_current_nodes.push(this);
 
 	doPass1(tdbb, csb, list.getAddress());
@@ -1318,14 +1317,21 @@ BoolExprNode* InListBoolNode::pass1(thread_db* tdbb, CompilerScratch* csb)
 
 	if (nodFlags & FLAG_INVARIANT)
 	{
+		// If there is no top-level RSE present and list items are not constant, unmark node as invariant
+		// because it may be dependent on data or variables
+
+		for (const auto& ctxNode : csb->csb_current_nodes)
+		{
+			if (nodeIs<RseNode>(ctxNode))
+				return this;
+		}
+
 		for (auto item : list->items)
 		{
 			while (auto castNode = nodeAs<CastNode>(item))
 				item = castNode->source;
 
-			if (!nodeIs<LiteralNode>(item) &&
-				!nodeIs<ParameterNode>(item) &&
-				!nodeIs<VariableNode>(item))
+			if (!nodeIs<LiteralNode>(item) && !nodeIs<ParameterNode>(item))
 			{
 				nodFlags &= ~FLAG_INVARIANT;
 				break;
@@ -1336,14 +1342,13 @@ BoolExprNode* InListBoolNode::pass1(thread_db* tdbb, CompilerScratch* csb)
 	return this;
 }
 
-void InListBoolNode::pass2Boolean1(thread_db* /*tdbb*/, CompilerScratch* csb)
+void InListBoolNode::pass2Boolean(thread_db* tdbb, CompilerScratch* csb, std::function<void ()> process)
 {
 	if (nodFlags & FLAG_INVARIANT)
 		csb->csb_invariants.push(&impureOffset);
-}
 
-void InListBoolNode::pass2Boolean2(thread_db* tdbb, CompilerScratch* csb)
-{
+	process();
+
 	if (const auto keyNode = nodeAs<RecordKeyNode>(arg))
 	{
 		if (keyNode->aggregate)
@@ -1363,7 +1368,10 @@ void InListBoolNode::pass2Boolean2(thread_db* tdbb, CompilerScratch* csb)
 	}
 
 	if (nodFlags & FLAG_INVARIANT)
+	{
 		impureOffset = csb->allocImpure<impure_value>();
+		lookup = FB_NEW_POOL(csb->csb_pool) LookupValueList(csb->csb_pool, list, impureOffset);
+	}
 }
 
 bool InListBoolNode::execute(thread_db* tdbb, Request* request) const
@@ -1372,38 +1380,14 @@ bool InListBoolNode::execute(thread_db* tdbb, Request* request) const
 	{
 		if (nodFlags & FLAG_INVARIANT)
 		{
-			const auto impure = request->getImpure<impure_value>(impureOffset);
-			auto sortedList = impure->vlu_misc.vlu_sortedList;
+			const auto res = lookup->find(tdbb, request, arg, argDesc);
 
-			if (!(impure->vlu_flags & VLU_computed))
-			{
-				delete impure->vlu_misc.vlu_sortedList;
+			if (res.isAssigned())
+				return res.value;
 
-				sortedList = impure->vlu_misc.vlu_sortedList =
-					FB_NEW_POOL(*tdbb->getDefaultPool())
-						SortedValueList(*tdbb->getDefaultPool(), list->items.getCount());
-
-				sortedList->setSortMode(FB_ARRAY_SORT_MANUAL);
-
-				for (const auto value : list->items)
-				{
-					if (const auto valueDesc = EVL_expr(tdbb, request, value))
-						sortedList->add(SortValueItem(value, valueDesc));
-				}
-
-				sortedList->sort();
-
-				impure->vlu_flags |= VLU_computed;
-			}
-
-			if (sortedList->isEmpty())
-			{
-				fb_assert(list->items.hasData());
-				request->req_flags |= req_null;
-				return false;
-			}
-
-			return sortedList->exist(SortValueItem(arg, argDesc));
+			fb_assert(list->items.hasData());
+			request->req_flags |= req_null;
+			return false;
 		}
 
 		for (const auto value : list->items)

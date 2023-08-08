@@ -50,7 +50,6 @@ class BtrPageGCLock;
 class Sort;
 class PartitionedSort;
 struct sort_key_def;
-class ValueListNode;
 
 // Index descriptor block -- used to hold info from index root page
 
@@ -221,8 +220,8 @@ public:
 	USHORT irb_upper_count;			// Number of segments for retrieval
 	temporary_key* irb_key;			// Key for equality retrieval
 	MetaName* irb_name;				// Index name
-	ValueExprNode** irb_value;		// Matching value
-	ValueListNode* irb_list;		// Matching values list
+	ValueExprNode** irb_value;		// Matching value (for equality search)
+	LookupValueList* irb_list;		// Matching values list (for IN <list>)
 };
 
 // Flag values for irb_generic
@@ -475,37 +474,28 @@ private:
 class IndexScanListIterator
 {
 public:
-	IndexScanListIterator(thread_db* tdbb,
-						  const IndexRetrieval* retrieval,
-						  const SortedValueList& sortedList);
+	IndexScanListIterator(thread_db* tdbb, const IndexRetrieval* retrieval);
 
-	bool hasData() const
+	temporary_key* getNext()
 	{
-		return (m_iterator && m_iterator < m_values.end());
-	}
-
-	const temporary_key& getKey() const
-	{
-		return m_key;
-	}
-
-	void operator++()
-	{
-		fb_assert(m_iterator);
-
 		while (++m_iterator < m_values.end())
 		{
-			if (makeKey())
-				break;
+			if (makeKey(false))
+				return &m_key;
 		}
+
+		m_iterator = nullptr;
+		return nullptr;
 	}
 
+private:
+	bool makeKey(bool first);
+
+	thread_db* const m_tdbb;
 	const IndexRetrieval* const m_retrieval;
-	Firebird::HalfStaticArray<const ValueExprNode*, 64> m_values;
+	Firebird::HalfStaticArray<ValueExprNode*, 4> m_values;
 	const ValueExprNode* const* m_iterator;
 	temporary_key m_key;
-
-	bool makeKey();
 };
 
 } //namespace Jrd

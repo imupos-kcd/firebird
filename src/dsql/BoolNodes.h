@@ -166,13 +166,13 @@ public:
 	virtual bool dsqlMatch(DsqlCompilerScratch* dsqlScratch, const ExprNode* other, bool ignoreMapCast) const;
 	virtual bool sameAs(const ExprNode* other, bool ignoreStreams) const;
 	virtual BoolExprNode* pass1(thread_db* tdbb, CompilerScratch* csb);
-	virtual void pass2Boolean1(thread_db* tdbb, CompilerScratch* csb);
-	virtual void pass2Boolean2(thread_db* tdbb, CompilerScratch* csb);
+	void pass2Boolean(thread_db* tdbb, CompilerScratch* csb, std::function<void ()> process);
 	virtual bool execute(thread_db* tdbb, Request* request) const;
 
 public:
 	NestConst<ValueExprNode> arg;
 	NestConst<ValueListNode> list;
+	NestConst<LookupValueList> lookup;
 };
 
 

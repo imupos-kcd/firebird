@@ -160,8 +160,8 @@ void RecordSource::printInversion(thread_db* tdbb, const InversionNode* inversio
 				const bool partial = (retrieval->irb_generic & irb_partial);
 
 				const bool fullscan = (maxSegs == 0);
-				const bool unique = uniqueIdx && equality && (minSegs == segCount);
 				const bool list = (retrieval->irb_list != nullptr);
+				const bool unique = !list && uniqueIdx && equality && (minSegs == segCount);
 
 				string bounds;
 				if (!unique && !fullscan)
