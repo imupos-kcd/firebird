@@ -372,6 +372,12 @@ public:
 				break;
 			}
 		}
+		else if (const auto listNode = nodeAs<InListBoolNode>(node))
+		{
+			const auto selectivity = REDUCE_SELECTIVITY_FACTOR_EQUALITY *
+				listNode->list->items.getCount();
+			return MIN(selectivity, MAXIMUM_SELECTIVITY);
+		}
 		else if (nodeIs<MissingBoolNode>(node))
 		{
 			return REDUCE_SELECTIVITY_FACTOR_EQUALITY;

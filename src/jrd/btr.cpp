@@ -682,61 +682,75 @@ IndexScanListIterator::IndexScanListIterator(thread_db* tdbb, const IndexRetriev
 	  m_values(*tdbb->getDefaultPool(), retrieval->irb_list->getCount()),
 	  m_iterator(m_values.begin())
 {
-	fb_assert(retrieval->irb_lower_count && retrieval->irb_upper_count);
-	fb_assert(retrieval->irb_lower_count == retrieval->irb_upper_count);
+	fb_assert(retrieval->irb_list && retrieval->irb_list->getCount());
+
+	const auto count = MIN(retrieval->irb_lower_count, retrieval->irb_upper_count);
+	fb_assert(count);
+
+	for (unsigned i = 0; i < count; i++)
+	{
+		if (!retrieval->irb_value[i])
+		{
+			m_segno = i;
+			break;
+		}
+	}
+
+	fb_assert(m_segno < count);
 
 	m_values.assign(retrieval->irb_list->begin(), retrieval->irb_list->getCount());
-	fb_assert(m_values.hasData());
 
 	if (retrieval->irb_generic & irb_descending)
 		std::reverse(m_values.begin(), m_values.end());
 
-	makeKey(true);
+	makeKeys();
 }
 
-bool IndexScanListIterator::makeKey(bool first)
+void IndexScanListIterator::makeKeys()
 {
-	const auto count = m_retrieval->irb_lower_count;
-
-	// Set up upper bound
-	auto values = m_retrieval->irb_value;
-	values[count - 1] = const_cast<ValueExprNode*>(*m_iterator);
-
-	// Set up lower bound
-	values += m_retrieval->irb_desc.idx_count;
-	values[count - 1] = const_cast<ValueExprNode*>(*m_iterator);
-
-	// Evaluate the key
-
-	temporary_key tempKey;
-
-	const USHORT keyType =
+	const auto keyType =
 		(m_retrieval->irb_desc.idx_flags & idx_unique) ? INTL_KEY_UNIQUE : INTL_KEY_SORT;
 
-	const idx_e errorCode =
-		BTR_make_key(m_tdbb, count, values, &m_retrieval->irb_desc, &tempKey, keyType);
+	// Complete the lower bound and make its key
+
+	auto values = m_retrieval->irb_value;
+	values[m_segno] = const_cast<ValueExprNode*>(*m_iterator);
+
+	idx_e errorCode = BTR_make_key(m_tdbb, m_retrieval->irb_lower_count, values,
+		&m_retrieval->irb_desc, &m_lower, keyType);
 
 	if (errorCode != idx_e_ok)
 	{
 		index_desc temp_idx = m_retrieval->irb_desc;
 		IndexErrorContext context(m_retrieval->irb_relation, &temp_idx);
-		context.raise(m_tdbb, errorCode, NULL);
+		context.raise(m_tdbb, errorCode);
 	}
 
-	fb_assert(!tempKey.key_next);
+	// Complete the upper bound
 
-	// If the key is equal to the prior one, indicate it to be skipped by the caller
+	values += m_retrieval->irb_desc.idx_count;
+	values[m_segno] = const_cast<ValueExprNode*>(*m_iterator);
 
-	if (!first &&
-		tempKey.key_length == m_key.key_length &&
-		!memcmp(tempKey.key_data, m_key.key_data, m_key.key_length))
+	// If we have an equality search, lower/upper bounds are actually the same key
+
+	if (m_retrieval->irb_generic & irb_equality)
 	{
-		return false;
+		m_upper.key_length = m_lower.key_length;
+		memcpy(m_upper.key_data, m_lower.key_data, m_lower.key_length);
+		return;
 	}
 
-	m_key.key_length = tempKey.key_length;
-	memcpy(m_key.key_data, tempKey.key_data, tempKey.key_length);
-	return true;
+	// Make the upper bound key
+
+	errorCode = BTR_make_key(m_tdbb, m_retrieval->irb_upper_count, values,
+		&m_retrieval->irb_desc, &m_upper, keyType);
+
+	if (errorCode != idx_e_ok)
+	{
+		index_desc temp_idx = m_retrieval->irb_desc;
+		IndexErrorContext context(m_retrieval->irb_relation, &temp_idx);
+		context.raise(m_tdbb, errorCode);
+	}
 }
 
 
@@ -1223,14 +1237,13 @@ void BTR_evaluate(thread_db* tdbb, const IndexRetrieval* retrieval, RecordBitmap
 		// If we have a list of values to match, switch to the new lookup key
 		// and continue scanning from the current position
 
-		if (iterator)
+		if (iterator && iterator->getNext())
 		{
-			const auto nextKey = iterator->getNext();
-			lower = upper = nextKey; // update both bounds with the new lookup key
-			startFromRoot = false;
+			// Update both bounds with the new lookup key
+			lower = iterator->getLower();
+			upper = iterator->getUpper();
 
-			if (!nextKey)
-				CCH_RELEASE(tdbb, &window);
+			startFromRoot = false;
 		}
 		else
 		{

@@ -834,6 +834,7 @@ void Retrieval::getInversionCandidates(InversionCandidateList& inversions,
 			scratch.selectivity = idx->idx_fraction;
 
 			bool unique = false;
+			unsigned listCount = 0;
 
 			for (unsigned j = 0; j < scratch.segments.getCount(); j++)
 			{
@@ -868,11 +869,22 @@ void Retrieval::getInversionCandidates(InversionCandidateList& inversions,
 					}
 				}
 
+				if (const auto list = segment.valueList)
+				{
+					fb_assert(segment.scanType == segmentScanList);
+
+					if (listCount) // we cannot have more than one list matched to an index
+						break;
+
+					listCount = list->getCount();
+				}
+
 				// Check if this is the last usable segment
 				if (!scratch.usePartialKey &&
 					(segment.scanType == segmentScanEqual ||
 					 segment.scanType == segmentScanEquivalent ||
-					 segment.scanType == segmentScanMissing))
+					 segment.scanType == segmentScanMissing ||
+					 segment.scanType == segmentScanList))
 				{
 					// This is a perfect usable segment thus update root selectivity
 					scratch.lowerCount++;
@@ -914,7 +926,7 @@ void Retrieval::getInversionCandidates(InversionCandidateList& inversions,
 				{
 					// This is our last segment that we can use,
 					// estimate the selectivity
-					double selectivity = scratch.selectivity;
+					auto selectivity = scratch.selectivity;
 					double factor = 1;
 
 					switch (segment.scanType)
@@ -947,33 +959,16 @@ void Retrieval::getInversionCandidates(InversionCandidateList& inversions,
 							factor = REDUCE_SELECTIVITY_FACTOR_STARTING;
 							break;
 
-						case segmentScanList:
-							scratch.lowerCount++;
-							scratch.upperCount++;
-							selectivity = idx->idx_rpt[j].idx_selectivity;
-							break;
-
 						default:
 							fb_assert(segment.scanType == segmentScanNone);
 							break;
 					}
 
-					if (const auto list = segment.valueList)
-					{
-						fb_assert(segment.scanType == segmentScanList);
-						// Adjust selectivity based on the list items count
-						selectivity *= list->getCount();
-						selectivity = MIN(selectivity, MAXIMUM_SELECTIVITY);
-					}
-					else
-					{
-						// Adjust the compound selectivity using the reduce factor.
-						// It should be better than the previous segment but worse
-						// than a full match.
-						const double diffSelectivity = scratch.selectivity - selectivity;
-						selectivity += (diffSelectivity * factor);
-					}
-
+					// Adjust the compound selectivity using the reduce factor.
+					// It should be better than the previous segment but worse
+					// than a full match.
+					const double diffSelectivity = scratch.selectivity - selectivity;
+					selectivity += (diffSelectivity * factor);
 					fb_assert(selectivity <= scratch.selectivity);
 					scratch.selectivity = selectivity;
 
@@ -999,11 +994,18 @@ void Retrieval::getInversionCandidates(InversionCandidateList& inversions,
 				if (selectivity <= 0)
 					selectivity = unique ? 1 / cardinality : DEFAULT_SELECTIVITY;
 
+				if (listCount)
+				{
+					// Adjust selectivity based on the list items count
+					selectivity *= listCount;
+					selectivity = MIN(selectivity, MAXIMUM_SELECTIVITY);
+				}
+
 				const auto invCandidate = FB_NEW_POOL(getPool()) InversionCandidate(getPool());
 				invCandidate->unique = unique;
 				invCandidate->selectivity = selectivity;
 				// Calculate the cost (only index pages) for this index.
-				invCandidate->cost = DEFAULT_INDEX_COST + scratch.selectivity * scratch.cardinality;
+				invCandidate->cost = DEFAULT_INDEX_COST + selectivity * scratch.cardinality;
 				invCandidate->nonFullMatchedSegments = scratch.nonFullMatchedSegments;
 				invCandidate->matchedSegments = MAX(scratch.lowerCount, scratch.upperCount);
 				invCandidate->indexes = 1;
@@ -1080,44 +1082,49 @@ InversionNode* Retrieval::makeIndexScanNode(IndexScratch* indexScratch) const
 	if (!createIndexScanNodes)
 		return nullptr;
 
-	// For the IN <list> scan, estimate its cost in advance and transform
-	// the scan to multiple lookups (bitmap-based) if it looks cheaper
+	const auto idx = indexScratch->index;
+	auto& segments = indexScratch->segments;
 
-	if (indexScratch->lowerCount &&
-		indexScratch->lowerCount == indexScratch->upperCount)
+	if (!(idx->idx_runtime_flags & idx_navigate))
 	{
-		const auto lastSegmentIndex = indexScratch->lowerCount - 1;
-		auto& lastSegment = indexScratch->segments[lastSegmentIndex];
+		// For the IN <list> scan, estimate its cost in advance and transform
+		// the scan to multiple lookups (bitmap-based) if it looks cheaper
 
-		if (const auto list = lastSegment.valueList)
+		if (const auto count = MIN(indexScratch->lowerCount, indexScratch->upperCount))
 		{
-			fb_assert(lastSegment.scanType == segmentScanList);
-
-			const auto lookupCost = DEFAULT_INDEX_COST * list->getCount() +
-				indexScratch->cardinality * indexScratch->selectivity;
-			const auto siblingScanCost = DEFAULT_INDEX_COST +
-				indexScratch->cardinality * DEFAULT_SELECTIVITY;
-
-			if (lookupCost < siblingScanCost)
+			for (unsigned i = 0; i < count; i++)
 			{
-				lastSegment.scanType = segmentScanEqual;
-				lastSegment.valueList = nullptr;
+				if (segments[i].scanType != segmentScanList)
+					continue;
 
-				InversionNode* listInversion = nullptr;
+				const auto list = segments[i].valueList;
 
-				for (const auto value : *list)
+				const auto lookupCost = DEFAULT_INDEX_COST * list->getCount() +
+					indexScratch->cardinality * indexScratch->selectivity;
+				const auto siblingScanCost = DEFAULT_INDEX_COST +
+					indexScratch->cardinality * DEFAULT_SELECTIVITY;
+
+				if (lookupCost < siblingScanCost)
 				{
-					lastSegment.lowerValue = lastSegment.upperValue = value;
-					const auto inversion = makeIndexScanNode(indexScratch);
-					listInversion = composeInversion(listInversion, inversion, InversionNode::TYPE_IN);
+					segments[i].scanType = segmentScanEqual;
+					segments[i].valueList = nullptr;
+
+					InversionNode* listInversion = nullptr;
+
+					for (const auto value : *list)
+					{
+						segments[i].lowerValue = segments[i].upperValue = value;
+						const auto inversion = makeIndexScanNode(indexScratch);
+						listInversion = composeInversion(listInversion, inversion, InversionNode::TYPE_IN);
+					}
+
+					return listInversion;
 				}
 
-				return listInversion;
+				break;
 			}
 		}
 	}
-
-	index_desc* const idx = indexScratch->index;
 
 	// Check whether this is during a compile or during a SET INDEX operation
 	if (csb)
@@ -1152,8 +1159,6 @@ InversionNode* Retrieval::makeIndexScanNode(IndexScratch* indexScratch) const
 		retrieval->irb_generic |= irb_descending;
 	}
 
-	const auto& segments = indexScratch->segments;
-
 	if (const auto count = MAX(indexScratch->lowerCount, indexScratch->upperCount))
 	{
 		bool ignoreNullsOnScan = true;
@@ -1175,6 +1180,12 @@ InversionNode* Retrieval::makeIndexScanNode(IndexScratch* indexScratch) const
 
 				if (segments[i].scanType == segmentScanEquivalent)
 					ignoreNullsOnScan = false;
+
+				if (segments[i].scanType == segmentScanList)
+				{
+					fb_assert(!retrieval->irb_list);
+					retrieval->irb_list = segments[i].valueList;
+				}
 			}
 		}
 
@@ -1189,11 +1200,6 @@ InversionNode* Retrieval::makeIndexScanNode(IndexScratch* indexScratch) const
 
 		if (lastSegment.scanType == segmentScanStarting)
 			retrieval->irb_generic |= irb_starting;
-		else if (lastSegment.scanType == segmentScanList)
-		{
-			retrieval->irb_list = lastSegment.valueList;
-			fb_assert(retrieval->irb_list);
-		}
 
 		if (lastSegment.excludeLower)
 			retrieval->irb_generic |= irb_exclude_lower;
@@ -1755,7 +1761,8 @@ bool Retrieval::matchBoolean(IndexScratch* indexScratch,
 					// AB: If we have already an exact match don't
 					// override it with worser matches.
 					if (!((segment->scanType == segmentScanEqual) ||
-						(segment->scanType == segmentScanEquivalent)))
+						(segment->scanType == segmentScanEquivalent) ||
+						(segment->scanType == segmentScanList)))
 					{
 						segment->lowerValue = injectCast(csb, value, cast, matchDesc);
 						segment->upperValue = injectCast(csb, value2, cast2, matchDesc);

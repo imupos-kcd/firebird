@@ -251,27 +251,29 @@ bool IndexTableScan::internalGetRecord(thread_db* tdbb) const
 			if (retrieval->irb_upper_count &&
 				compareKeys(idx, key.key_data, key.key_length, &upper, flags) > 0)
 			{
-				if (!impure->irsb_iterator)
-					break;
-
-				if (const auto nextKey = impure->irsb_iterator->getNext())
+				if (impure->irsb_iterator && impure->irsb_iterator->getNext())
 				{
-					// Update the upper bound
-					const auto length = upper.key_length = nextKey->key_length;
-					memcpy(upper.key_data, nextKey->key_data, length);
+					const auto nextLower = impure->irsb_iterator->getLower();
+					const auto nextUpper = impure->irsb_iterator->getUpper();
 
 					// If END_BUCKET is reached BTR_find_leaf will return NULL
-					while (!(nextPointer = BTR_find_leaf(page, &upper, nullptr, nullptr,
+					while (!(nextPointer = BTR_find_leaf(page, nextLower, nullptr, nullptr,
 						(idx->idx_flags & idx_descending),
 						(retrieval->irb_generic & (irb_starting | irb_partial)))))
 					{
 						page = (Ods::btree_page*) CCH_HANDOFF(tdbb, &window, page->btr_sibling, LCK_read, pag_index);
 					}
 
+					// Update the local upper bound
+					upper.key_length = nextUpper->key_length;
+					memcpy(upper.key_data, nextUpper->key_data, nextUpper->key_length);
+
 					// Update the keys in the impure area
-					impure->irsb_nav_length = impure->irsb_nav_upper_length = length;
-					memcpy(impure->irsb_nav_data + m_length, nextKey->key_data, length);
-					impure->irsb_nav_current_lower = impure->irsb_nav_current_upper = nextKey;
+					impure->irsb_nav_length = nextLower->key_length;
+					impure->irsb_nav_upper_length = MIN(m_length + 1, nextUpper->key_length);
+					memcpy(impure->irsb_nav_data + m_length, nextUpper->key_data, impure->irsb_nav_upper_length);
+					impure->irsb_nav_current_lower = nextLower;
+					impure->irsb_nav_current_upper = nextUpper;
 
 					continue;
 				}
