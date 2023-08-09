@@ -478,7 +478,7 @@ public:
 
 	bool getNext()
 	{
-		if (++m_iterator < m_values.end())
+		if (++m_iterator < m_listValues.end())
 		{
 			makeKeys();
 			return true;
@@ -488,14 +488,36 @@ public:
 		return false;
 	}
 
-	temporary_key* getLower()
+	temporary_key* getLowerKey()
 	{
 		return &m_lower;
 	}
 
-	temporary_key* getUpper()
+	temporary_key* getUpperKey()
 	{
 		return &m_upper;
+	}
+
+	ValueExprNode** getLowerValues()
+	{
+		const auto values = m_retrieval->irb_value;
+		m_keyValues.assign(values, m_retrieval->irb_lower_count);
+
+		fb_assert(!m_keyValues[m_segno]);
+		m_keyValues[m_segno] = const_cast<ValueExprNode*>(*m_iterator);
+
+		return m_keyValues.begin();
+	}
+
+	ValueExprNode** getUpperValues()
+	{
+		const auto values = m_retrieval->irb_value + m_retrieval->irb_desc.idx_count;
+		m_keyValues.assign(values, m_retrieval->irb_upper_count);
+
+		fb_assert(!m_keyValues[m_segno]);
+		m_keyValues[m_segno] = const_cast<ValueExprNode*>(*m_iterator);
+
+		return m_keyValues.begin();
 	}
 
 private:
@@ -503,7 +525,8 @@ private:
 
 	thread_db* const m_tdbb;
 	const IndexRetrieval* const m_retrieval;
-	Firebird::HalfStaticArray<ValueExprNode*, 4> m_values;
+	Firebird::HalfStaticArray<ValueExprNode*, 4> m_listValues;
+	Firebird::HalfStaticArray<ValueExprNode*, 4> m_keyValues;
 	const ValueExprNode* const* m_iterator;
 	temporary_key m_lower, m_upper;
 	USHORT m_segno = MAX_USHORT;

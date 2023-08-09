@@ -1901,17 +1901,19 @@ bool Retrieval::matchBoolean(IndexScratch* indexScratch,
 			if (!((segment->scanType == segmentScanEqual) ||
 				(segment->scanType == segmentScanEquivalent)))
 			{
-				auto lookup = listNode->lookup;
-				for (auto& item : *lookup)
+				if (auto lookup = listNode->lookup)
 				{
-					cast = nullptr; // create new cast node for every value
-					item = injectCast(csb, item, cast, matchDesc);
+					for (auto& item : *lookup)
+					{
+						cast = nullptr; // create new cast node for every value
+						item = injectCast(csb, item, cast, matchDesc);
+					}
+					segment->lowerValue = segment->upperValue = nullptr;
+					segment->valueList = lookup;
+					segment->scanType = segmentScanList;
+					segment->excludeLower = false;
+					segment->excludeUpper = false;
 				}
-				segment->lowerValue = segment->upperValue = nullptr;
-				segment->valueList = lookup;
-				segment->scanType = segmentScanList;
-				segment->excludeLower = false;
-				segment->excludeUpper = false;
 			}
 		}
 		else if (missingNode)

@@ -253,8 +253,8 @@ bool IndexTableScan::internalGetRecord(thread_db* tdbb) const
 			{
 				if (impure->irsb_iterator && impure->irsb_iterator->getNext())
 				{
-					const auto nextLower = impure->irsb_iterator->getLower();
-					const auto nextUpper = impure->irsb_iterator->getUpper();
+					const auto nextLower = impure->irsb_iterator->getLowerKey();
+					const auto nextUpper = impure->irsb_iterator->getUpperKey();
 
 					// If END_BUCKET is reached BTR_find_leaf will return NULL
 					while (!(nextPointer = BTR_find_leaf(page, nextLower, nullptr, nullptr,
@@ -616,7 +616,10 @@ UCHAR* IndexTableScan::openStream(thread_db* tdbb, Impure* impure, win* window) 
 	const IndexRetrieval* const retrieval = m_index->retrieval;
 	index_desc* const idx = (index_desc*) ((SCHAR*) impure + m_offset);
 
-	Ods::btree_page* page = BTR_find_page(tdbb, retrieval, window, idx, lower, upper, firstKeys);
+	if (firstKeys)
+		BTR_make_bounds(tdbb, retrieval, impure->irsb_iterator, lower, upper);
+
+	Ods::btree_page* page = BTR_find_page(tdbb, retrieval, window, idx, lower, upper);
 	setPage(tdbb, impure, window);
 
 	// find the upper limit for the search

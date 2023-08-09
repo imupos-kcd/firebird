@@ -679,8 +679,9 @@ idx_e IndexKey::compose(Record* record)
 
 IndexScanListIterator::IndexScanListIterator(thread_db* tdbb, const IndexRetrieval* retrieval)
 	: m_tdbb(tdbb), m_retrieval(retrieval),
-	  m_values(*tdbb->getDefaultPool(), retrieval->irb_list->getCount()),
-	  m_iterator(m_values.begin())
+	  m_listValues(*tdbb->getDefaultPool(), retrieval->irb_list->getCount()),
+	  m_keyValues(*tdbb->getDefaultPool()),
+	  m_iterator(m_listValues.begin())
 {
 	fb_assert(retrieval->irb_list && retrieval->irb_list->getCount());
 
@@ -698,10 +699,10 @@ IndexScanListIterator::IndexScanListIterator(thread_db* tdbb, const IndexRetriev
 
 	fb_assert(m_segno < count);
 
-	m_values.assign(retrieval->irb_list->begin(), retrieval->irb_list->getCount());
+	m_listValues.assign(retrieval->irb_list->begin(), retrieval->irb_list->getCount());
 
 	if (retrieval->irb_generic & irb_descending)
-		std::reverse(m_values.begin(), m_values.end());
+		std::reverse(m_listValues.begin(), m_listValues.end());
 
 	makeKeys();
 }
@@ -711,12 +712,9 @@ void IndexScanListIterator::makeKeys()
 	const auto keyType =
 		(m_retrieval->irb_desc.idx_flags & idx_unique) ? INTL_KEY_UNIQUE : INTL_KEY_SORT;
 
-	// Complete the lower bound and make its key
+	// Make the lower bound key
 
-	auto values = m_retrieval->irb_value;
-	values[m_segno] = const_cast<ValueExprNode*>(*m_iterator);
-
-	idx_e errorCode = BTR_make_key(m_tdbb, m_retrieval->irb_lower_count, values,
+	idx_e errorCode = BTR_make_key(m_tdbb, m_retrieval->irb_lower_count, getLowerValues(),
 		&m_retrieval->irb_desc, &m_lower, keyType);
 
 	if (errorCode != idx_e_ok)
@@ -725,11 +723,6 @@ void IndexScanListIterator::makeKeys()
 		IndexErrorContext context(m_retrieval->irb_relation, &temp_idx);
 		context.raise(m_tdbb, errorCode);
 	}
-
-	// Complete the upper bound
-
-	values += m_retrieval->irb_desc.idx_count;
-	values[m_segno] = const_cast<ValueExprNode*>(*m_iterator);
 
 	// If we have an equality search, lower/upper bounds are actually the same key
 
@@ -742,7 +735,7 @@ void IndexScanListIterator::makeKeys()
 
 	// Make the upper bound key
 
-	errorCode = BTR_make_key(m_tdbb, m_retrieval->irb_upper_count, values,
+	errorCode = BTR_make_key(m_tdbb, m_retrieval->irb_upper_count, getUpperValues(),
 		&m_retrieval->irb_desc, &m_upper, keyType);
 
 	if (errorCode != idx_e_ok)
@@ -1080,7 +1073,6 @@ static void checkForLowerKeySkip(bool& skipLowerKey,
 	}
 }
 
-
 void BTR_evaluate(thread_db* tdbb, const IndexRetrieval* retrieval, RecordBitmap** bitmap,
 				  RecordBitmap* bitmap_and)
 {
@@ -1110,10 +1102,11 @@ void BTR_evaluate(thread_db* tdbb, const IndexRetrieval* retrieval, RecordBitmap
 		retrieval->irb_list ? FB_NEW_POOL(*tdbb->getDefaultPool())
 			IndexScanListIterator(tdbb, retrieval) : nullptr;
 
-	index_desc idx;
 	temporary_key* lower = &lowerKey;
 	temporary_key* upper = &upperKey;
-	bool first = true;
+	BTR_make_bounds(tdbb, retrieval, iterator, lower, upper);
+
+	index_desc idx;
 	bool startFromRoot = true;
 	btree_page* page = nullptr;
 
@@ -1122,8 +1115,7 @@ void BTR_evaluate(thread_db* tdbb, const IndexRetrieval* retrieval, RecordBitmap
 		if (startFromRoot)
 		{
 			// Scan from the index root
-			page = BTR_find_page(tdbb, retrieval, &window, &idx, lower, upper, first);
-			first = false;
+			page = BTR_find_page(tdbb, retrieval, &window, &idx, lower, upper);
 		}
 
 		const bool descending = (idx.idx_flags & idx_descending);
@@ -1240,8 +1232,8 @@ void BTR_evaluate(thread_db* tdbb, const IndexRetrieval* retrieval, RecordBitmap
 		if (iterator && iterator->getNext())
 		{
 			// Update both bounds with the new lookup key
-			lower = iterator->getLower();
-			upper = iterator->getUpper();
+			lower = iterator->getLowerKey();
+			upper = iterator->getUpperKey();
 
 			startFromRoot = false;
 		}
@@ -1280,8 +1272,7 @@ btree_page* BTR_find_page(thread_db* tdbb,
 						  WIN* window,
 						  index_desc* idx,
 						  temporary_key* lower,
-						  temporary_key* upper,
-						  bool makeKeys)
+						  temporary_key* upper)
 {
 /**************************************
  *
@@ -1295,51 +1286,6 @@ btree_page* BTR_find_page(thread_db* tdbb,
  **************************************/
 
 	SET_TDBB(tdbb);
-
-	// Generate keys before we get any pages locked to avoid unwind
-	// problems --  if we already have a key, assume that we
-	// are looking for an equality
-	if (retrieval->irb_key)
-	{
-		fb_assert(makeKeys);
-		copy_key(retrieval->irb_key, lower);
-		copy_key(retrieval->irb_key, upper);
-	}
-	else if (makeKeys)
-	{
-		idx_e errorCode = idx_e_ok;
-
-		const USHORT keyType =
-			(retrieval->irb_generic & irb_multi_starting) ? INTL_KEY_MULTI_STARTING :
-			(retrieval->irb_generic & irb_starting) ? INTL_KEY_PARTIAL :
-			(retrieval->irb_desc.idx_flags & idx_unique) ? INTL_KEY_UNIQUE :
-			INTL_KEY_SORT;
-
-		if (retrieval->irb_upper_count)
-		{
-			errorCode = BTR_make_key(tdbb, retrieval->irb_upper_count,
-									 retrieval->irb_value + retrieval->irb_desc.idx_count,
-									 &retrieval->irb_desc, upper,
-									 keyType);
-		}
-
-		if (errorCode == idx_e_ok)
-		{
-			if (retrieval->irb_lower_count)
-			{
-				errorCode = BTR_make_key(tdbb, retrieval->irb_lower_count,
-										 retrieval->irb_value, &retrieval->irb_desc, lower,
-										 keyType);
-			}
-		}
-
-		if (errorCode != idx_e_ok)
-		{
-			index_desc temp_idx = retrieval->irb_desc; // to avoid constness issues
-			IndexErrorContext context(retrieval->irb_relation, &temp_idx);
-			context.raise(tdbb, errorCode, NULL);
-		}
-	}
 
 	RelationPages* relPages = retrieval->irb_relation->getPages(tdbb);
 	fb_assert(window->win_page.getPageSpaceID() == relPages->rel_pg_space_id);
@@ -1761,6 +1707,68 @@ bool BTR_lookup(thread_db* tdbb, jrd_rel* relation, USHORT id, index_desc* buffe
 	const bool result = (id < root->irt_count && BTR_description(tdbb, relation, root, buffer, id));
 	CCH_RELEASE(tdbb, &window);
 	return result;
+}
+
+
+void BTR_make_bounds(thread_db* tdbb, const IndexRetrieval* retrieval,
+					 IndexScanListIterator* iterator,
+					 temporary_key* lower, temporary_key* upper)
+{
+/**************************************
+ *
+ *	B T R _ m a k e _ b o u n d s
+ *
+ **************************************
+ *
+ * Functional description
+ *	Construct search keys for lower/upper bounds for the given retrieval.
+ *
+ **************************************/
+
+	// If we already have a key, assume that we are looking for an equality
+
+	if (retrieval->irb_key)
+	{
+		copy_key(retrieval->irb_key, lower);
+		copy_key(retrieval->irb_key, upper);
+	}
+	else
+	{
+		idx_e errorCode = idx_e_ok;
+		const auto idx = &retrieval->irb_desc;
+
+		const USHORT keyType =
+			(retrieval->irb_generic & irb_multi_starting) ? INTL_KEY_MULTI_STARTING :
+			(retrieval->irb_generic & irb_starting) ? INTL_KEY_PARTIAL :
+			(retrieval->irb_desc.idx_flags & idx_unique) ? INTL_KEY_UNIQUE :
+			INTL_KEY_SORT;
+
+		if (const auto count = retrieval->irb_upper_count)
+		{
+			const auto values = iterator ? iterator->getUpperValues() :
+				retrieval->irb_value + retrieval->irb_desc.idx_count;
+
+			errorCode = BTR_make_key(tdbb, count, values, idx, upper, keyType);
+		}
+
+		if (errorCode == idx_e_ok)
+		{
+			if (const auto count = retrieval->irb_lower_count)
+			{
+				const auto values = iterator ? iterator->getLowerValues() :
+					retrieval->irb_value;
+
+				errorCode = BTR_make_key(tdbb, count, values, idx, lower, keyType);
+			}
+		}
+
+		if (errorCode != idx_e_ok)
+		{
+			index_desc temp_idx = *idx; // to avoid constness issues
+			IndexErrorContext context(retrieval->irb_relation, &temp_idx);
+			context.raise(tdbb, errorCode);
+		}
+	}
 }
 
 
