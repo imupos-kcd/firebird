@@ -566,6 +566,7 @@ struct IndexScratch
 	unsigned nonFullMatchedSegments = 0;
 	bool usePartialKey = false;				// Use INTL_KEY_PARTIAL
 	bool useMultiStartingKeys = false;		// Use INTL_KEY_MULTI_STARTING
+	bool useRootListScan = false;
 
 	Firebird::ObjectsArray<IndexScratchSegment> segments;
 	MatchedBooleanList matches;					// matched booleans (partial indices only)

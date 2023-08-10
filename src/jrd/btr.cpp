@@ -680,10 +680,12 @@ idx_e IndexKey::compose(Record* record)
 IndexScanListIterator::IndexScanListIterator(thread_db* tdbb, const IndexRetrieval* retrieval)
 	: m_tdbb(tdbb), m_retrieval(retrieval),
 	  m_listValues(*tdbb->getDefaultPool(), retrieval->irb_list->getCount()),
-	  m_keyValues(*tdbb->getDefaultPool()),
+	  m_lowerValues(*tdbb->getDefaultPool()), m_upperValues(*tdbb->getDefaultPool()),
 	  m_iterator(m_listValues.begin())
 {
 	fb_assert(retrieval->irb_list && retrieval->irb_list->getCount());
+
+	// Find and store the position of the variable key segment
 
 	const auto count = MIN(retrieval->irb_lower_count, retrieval->irb_upper_count);
 	fb_assert(count);
@@ -699,44 +701,54 @@ IndexScanListIterator::IndexScanListIterator(thread_db* tdbb, const IndexRetriev
 
 	fb_assert(m_segno < count);
 
+	// Copy the list values. Reverse them if index is descending.
+
 	m_listValues.assign(retrieval->irb_list->begin(), retrieval->irb_list->getCount());
 
 	if (retrieval->irb_generic & irb_descending)
 		std::reverse(m_listValues.begin(), m_listValues.end());
 
-	makeKeys();
+	// Prepare the lower/upper key expressions for evaluation
+
+	auto values = m_retrieval->irb_value;
+	m_lowerValues.assign(values, m_retrieval->irb_lower_count);
+	fb_assert(!m_lowerValues[m_segno]);
+	m_lowerValues[m_segno] = const_cast<ValueExprNode*>(*m_iterator);
+
+	values += m_retrieval->irb_desc.idx_count;
+	m_upperValues.assign(values, m_retrieval->irb_upper_count);
+	fb_assert(!m_upperValues[m_segno]);
+	m_upperValues[m_segno] = const_cast<ValueExprNode*>(*m_iterator);
 }
 
-void IndexScanListIterator::makeKeys()
+void IndexScanListIterator::makeKeys(temporary_key* lower, temporary_key* upper)
 {
+	m_lowerValues[m_segno] = const_cast<ValueExprNode*>(*m_iterator);
+	m_upperValues[m_segno] = const_cast<ValueExprNode*>(*m_iterator);
+
 	const auto keyType =
 		(m_retrieval->irb_desc.idx_flags & idx_unique) ? INTL_KEY_UNIQUE : INTL_KEY_SORT;
 
 	// Make the lower bound key
 
 	idx_e errorCode = BTR_make_key(m_tdbb, m_retrieval->irb_lower_count, getLowerValues(),
-		&m_retrieval->irb_desc, &m_lower, keyType);
+		&m_retrieval->irb_desc, lower, keyType);
 
-	if (errorCode != idx_e_ok)
+	if (errorCode == idx_e_ok)
 	{
-		index_desc temp_idx = m_retrieval->irb_desc;
-		IndexErrorContext context(m_retrieval->irb_relation, &temp_idx);
-		context.raise(m_tdbb, errorCode);
+		if (m_retrieval->irb_generic & irb_equality)
+		{
+			// If we have an equality search, lower/upper bounds are actually the same key
+			copy_key(lower, upper);
+		}
+		else
+		{
+			// Make the upper bound key
+
+			errorCode = BTR_make_key(m_tdbb, m_retrieval->irb_upper_count, getUpperValues(),
+				&m_retrieval->irb_desc, upper, keyType);
+		}
 	}
-
-	// If we have an equality search, lower/upper bounds are actually the same key
-
-	if (m_retrieval->irb_generic & irb_equality)
-	{
-		m_upper.key_length = m_lower.key_length;
-		memcpy(m_upper.key_data, m_lower.key_data, m_lower.key_length);
-		return;
-	}
-
-	// Make the upper bound key
-
-	errorCode = BTR_make_key(m_tdbb, m_retrieval->irb_upper_count, getUpperValues(),
-		&m_retrieval->irb_desc, &m_upper, keyType);
 
 	if (errorCode != idx_e_ok)
 	{
@@ -1107,16 +1119,12 @@ void BTR_evaluate(thread_db* tdbb, const IndexRetrieval* retrieval, RecordBitmap
 	BTR_make_bounds(tdbb, retrieval, iterator, lower, upper);
 
 	index_desc idx;
-	bool startFromRoot = true;
 	btree_page* page = nullptr;
 
 	do
 	{
-		if (startFromRoot)
-		{
-			// Scan from the index root
+		if (!page) // scan from the index root
 			page = BTR_find_page(tdbb, retrieval, &window, &idx, lower, upper);
-		}
 
 		const bool descending = (idx.idx_flags & idx_descending);
 		bool skipLowerKey = (retrieval->irb_generic & irb_exclude_lower);
@@ -1226,24 +1234,23 @@ void BTR_evaluate(thread_db* tdbb, const IndexRetrieval* retrieval, RecordBitmap
 			}
 		}
 
-		// If we have a list of values to match, switch to the new lookup key
-		// and continue scanning from the current position
+		// Switch to the new lookup key and continue scanning
+		// either from the current position or from the root
 
-		if (iterator && iterator->getNext())
+		if (iterator && iterator->getNext(lower, upper))
 		{
-			// Update both bounds with the new lookup key
-			lower = iterator->getLowerKey();
-			upper = iterator->getUpperKey();
-
-			startFromRoot = false;
+			if (!(retrieval->irb_generic & irb_root_list_scan))
+				continue;
 		}
 		else
 		{
-			CCH_RELEASE(tdbb, &window);
-
 			lower = lower->key_next.get();
 			upper = upper->key_next.get();
 		}
+
+		CCH_RELEASE(tdbb, &window);
+		page = nullptr;
+
 	} while (lower && upper);
 }
 
@@ -6652,8 +6659,8 @@ static bool scan(thread_db* tdbb, UCHAR* pointer, RecordBitmap** bitmap, RecordB
 	const bool partLower = (retrieval->irb_lower_count < idx->idx_count);
 	const bool partUpper = (retrieval->irb_upper_count < idx->idx_count);
 
-	// reset irb_equality flag passed for optimization
-	flag &= ~(irb_equality | irb_ignore_null_value_key);
+	// Reset flags this routine does not check in the loop below
+	flag &= ~(irb_equality | irb_ignore_null_value_key | irb_root_list_scan);
 	flag &= ~(irb_exclude_lower | irb_exclude_upper);
 
 	IndexNode node;
@@ -6725,7 +6732,7 @@ static bool scan(thread_db* tdbb, UCHAR* pointer, RecordBitmap** bitmap, RecordB
 						// segment. Else, for ascending index, node is greater than
 						// the key and scan should be stopped.
 						// For descending index, the node is less than the key and
-						// scan shoud be continued.
+						// scan should be continued.
 
 						if ((flag & irb_partial) && !(flag & irb_starting))
 						{

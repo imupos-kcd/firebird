@@ -124,6 +124,7 @@ IndexScratch::IndexScratch(MemoryPool& p, const IndexScratch& other)
 	  nonFullMatchedSegments(other.nonFullMatchedSegments),
 	  usePartialKey(other.usePartialKey),
 	  useMultiStartingKeys(other.useMultiStartingKeys),
+	  useRootListScan(other.useRootListScan),
 	  segments(p, other.segments),
 	  matches(p, other.matches)
 {}
@@ -825,6 +826,7 @@ void Retrieval::getInversionCandidates(InversionCandidateList& inversions,
 		scratch.nonFullMatchedSegments = MAX_INDEX_SEGMENTS + 1;
 		scratch.usePartialKey = false;
 		scratch.useMultiStartingKeys = false;
+		scratch.useRootListScan = false;
 
 		const auto idx = scratch.index;
 
@@ -835,6 +837,7 @@ void Retrieval::getInversionCandidates(InversionCandidateList& inversions,
 
 			bool unique = false;
 			unsigned listCount = 0;
+			auto maxSelectivity = scratch.selectivity;
 
 			for (unsigned j = 0; j < scratch.segments.getCount(); j++)
 			{
@@ -877,6 +880,7 @@ void Retrieval::getInversionCandidates(InversionCandidateList& inversions,
 						break;
 
 					listCount = list->getCount();
+					maxSelectivity = scratch.selectivity;
 				}
 
 				// Check if this is the last usable segment
@@ -994,18 +998,33 @@ void Retrieval::getInversionCandidates(InversionCandidateList& inversions,
 				if (selectivity <= 0)
 					selectivity = unique ? 1 / cardinality : DEFAULT_SELECTIVITY;
 
+				// Calculate the cost (only index pages) for this index
+				auto cost = DEFAULT_INDEX_COST + selectivity * scratch.cardinality;
+
 				if (listCount)
 				{
 					// Adjust selectivity based on the list items count
 					selectivity *= listCount;
-					selectivity = MIN(selectivity, MAXIMUM_SELECTIVITY);
+					selectivity = MIN(selectivity, maxSelectivity);
+
+					const auto rootScanCost = DEFAULT_INDEX_COST * listCount +
+						scratch.cardinality * selectivity;
+					const auto siblingScanCost = DEFAULT_INDEX_COST +
+						scratch.cardinality * maxSelectivity * (listCount - 1) / (listCount + 1);
+
+					if (rootScanCost < siblingScanCost)
+					{
+						cost = rootScanCost;
+						scratch.useRootListScan = true;
+					}
+					else
+						cost = siblingScanCost;
 				}
 
 				const auto invCandidate = FB_NEW_POOL(getPool()) InversionCandidate(getPool());
 				invCandidate->unique = unique;
 				invCandidate->selectivity = selectivity;
-				// Calculate the cost (only index pages) for this index.
-				invCandidate->cost = DEFAULT_INDEX_COST + selectivity * scratch.cardinality;
+				invCandidate->cost = cost;
 				invCandidate->nonFullMatchedSegments = scratch.nonFullMatchedSegments;
 				invCandidate->matchedSegments = MAX(scratch.lowerCount, scratch.upperCount);
 				invCandidate->indexes = 1;
@@ -1084,47 +1103,6 @@ InversionNode* Retrieval::makeIndexScanNode(IndexScratch* indexScratch) const
 
 	const auto idx = indexScratch->index;
 	auto& segments = indexScratch->segments;
-
-	if (!(idx->idx_runtime_flags & idx_navigate))
-	{
-		// For the IN <list> scan, estimate its cost in advance and transform
-		// the scan to multiple lookups (bitmap-based) if it looks cheaper
-
-		if (const auto count = MIN(indexScratch->lowerCount, indexScratch->upperCount))
-		{
-			for (unsigned i = 0; i < count; i++)
-			{
-				if (segments[i].scanType != segmentScanList)
-					continue;
-
-				const auto list = segments[i].valueList;
-
-				const auto lookupCost = DEFAULT_INDEX_COST * list->getCount() +
-					indexScratch->cardinality * indexScratch->selectivity;
-				const auto siblingScanCost = DEFAULT_INDEX_COST +
-					indexScratch->cardinality * DEFAULT_SELECTIVITY;
-
-				if (lookupCost < siblingScanCost)
-				{
-					segments[i].scanType = segmentScanEqual;
-					segments[i].valueList = nullptr;
-
-					InversionNode* listInversion = nullptr;
-
-					for (const auto value : *list)
-					{
-						segments[i].lowerValue = segments[i].upperValue = value;
-						const auto inversion = makeIndexScanNode(indexScratch);
-						listInversion = composeInversion(listInversion, inversion, InversionNode::TYPE_IN);
-					}
-
-					return listInversion;
-				}
-
-				break;
-			}
-		}
-	}
 
 	// Check whether this is during a compile or during a SET INDEX operation
 	if (csb)
@@ -1215,6 +1193,12 @@ InversionNode* Retrieval::makeIndexScanNode(IndexScratch* indexScratch) const
 	{
 		// Flag the need to use INTL_KEY_MULTI_STARTING in btr.
 		retrieval->irb_generic |= irb_multi_starting | irb_starting;
+	}
+
+	if (indexScratch->useRootListScan)
+	{
+		fb_assert(retrieval->irb_list);
+		retrieval->irb_generic |= irb_root_list_scan;
 	}
 
 	// Check to see if this is really an equality retrieval
