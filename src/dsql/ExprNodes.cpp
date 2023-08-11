@@ -197,11 +197,11 @@ int SortValueItem::compare(const dsc* desc1, const dsc* desc2)
 	return MOV_compare(JRD_get_thread_data(), desc1, desc2);
 }
 
-LookupValueList::LookupValueList(MemoryPool& pool, const ValueListNode* values, ULONG impure)
+LookupValueList::LookupValueList(MemoryPool& pool, ValueListNode* values, ULONG impure)
 	: m_values(pool, values->items.getCount()), m_impureOffset(impure)
 {
-	for (const auto item : values->items)
-		m_values.add(const_cast<ValueExprNode*>(item.getObject()));
+	for (auto& item : values->items)
+		m_values.add(item);
 }
 
 TriState LookupValueList::find(thread_db* tdbb, Request* request, const ValueExprNode* value, const dsc* desc) const
@@ -212,6 +212,7 @@ TriState LookupValueList::find(thread_db* tdbb, Request* request, const ValueExp
 	if (!(impure->vlu_flags & VLU_computed))
 	{
 		delete impure->vlu_misc.vlu_sortedList;
+		impure->vlu_misc.vlu_sortedList = nullptr;
 
 		sortedList = impure->vlu_misc.vlu_sortedList =
 			FB_NEW_POOL(*tdbb->getDefaultPool())
@@ -4813,9 +4814,7 @@ void DecodeNode::genBlr(DsqlCompilerScratch* dsqlScratch)
 	dsqlScratch->appendUChar(conditions->items.getCount());
 
 	for (auto& condition : conditions->items)
-	{
 		condition->genBlr(dsqlScratch);
-	}
 
 	dsqlScratch->appendUChar(values->items.getCount());
 

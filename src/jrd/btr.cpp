@@ -713,18 +713,18 @@ IndexScanListIterator::IndexScanListIterator(thread_db* tdbb, const IndexRetriev
 	auto values = m_retrieval->irb_value;
 	m_lowerValues.assign(values, m_retrieval->irb_lower_count);
 	fb_assert(!m_lowerValues[m_segno]);
-	m_lowerValues[m_segno] = const_cast<ValueExprNode*>(*m_iterator);
+	m_lowerValues[m_segno] = *m_iterator;
 
 	values += m_retrieval->irb_desc.idx_count;
 	m_upperValues.assign(values, m_retrieval->irb_upper_count);
 	fb_assert(!m_upperValues[m_segno]);
-	m_upperValues[m_segno] = const_cast<ValueExprNode*>(*m_iterator);
+	m_upperValues[m_segno] = *m_iterator;
 }
 
 void IndexScanListIterator::makeKeys(temporary_key* lower, temporary_key* upper)
 {
-	m_lowerValues[m_segno] = const_cast<ValueExprNode*>(*m_iterator);
-	m_upperValues[m_segno] = const_cast<ValueExprNode*>(*m_iterator);
+	m_lowerValues[m_segno] = *m_iterator;
+	m_upperValues[m_segno] = *m_iterator;
 
 	const auto keyType =
 		(m_retrieval->irb_desc.idx_flags & idx_unique) ? INTL_KEY_UNIQUE : INTL_KEY_SORT;

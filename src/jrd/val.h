@@ -85,7 +85,7 @@ typedef Firebird::SortedArray<SortValueItem> SortedValueList;
 class LookupValueList
 {
 public:
-	LookupValueList(MemoryPool& pool, const ValueListNode* values, ULONG impure);
+	LookupValueList(MemoryPool& pool, ValueListNode* values, ULONG impure);
 
 	ULONG getCount() const { return m_values.getCount(); }
 	ValueExprNode** begin() { return m_values.begin(); }
