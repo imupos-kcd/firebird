@@ -53,6 +53,9 @@
  *
  * 2002.10.29 Sean Leyne - Removed obsolete "Netware" port
  *
+ * 2023.08.16 imupos - Disable read-only header validation
+ * 2023.08.16 imupos - Ignore hdr_force_write flag
+ *
  */
 
 
@@ -1176,41 +1179,6 @@ void PAG_header(thread_db* tdbb, bool info)
 		// If Header Page flag says the database is ReadOnly, gladly accept it.
 		dbb->dbb_flags &= ~DBB_being_opened_read_only;
 		dbb->dbb_flags |= DBB_read_only;
-	}
-
-	// If hdr_read_only is not set...
-	if (!(header->hdr_flags & hdr_read_only) && (dbb->dbb_flags & DBB_being_opened_read_only))
-	{
-		// Looks like the Header page says, it is NOT ReadOnly!! But the database
-		// file system permission gives only ReadOnly access. Punt out with
-		// isc_no_priv error (no privileges)
-		ERR_post(Arg::Gds(isc_no_priv) << Arg::Str("read-write") <<
-										  Arg::Str("database") <<
-										  Arg::Str(attachment->att_filename));
-	}
-
-	const bool useFSCache = dbb->dbb_bcb->bcb_count <
-		ULONG(dbb->dbb_config->getFileSystemCacheThreshold());
-
-	if ((header->hdr_flags & hdr_force_write) || !useFSCache)
-	{
-		dbb->dbb_flags |=
-			(header->hdr_flags & hdr_force_write ? DBB_force_write : 0) |
-			(useFSCache ? 0 : DBB_no_fs_cache);
-
-		const bool forceWrite = dbb->dbb_flags & DBB_force_write;
-		const bool notUseFSCache = dbb->dbb_flags & DBB_no_fs_cache;
-
-		PageSpace* pageSpace = dbb->dbb_page_manager.findPageSpace(DB_PAGE_SPACE);
-		for (jrd_file* file = pageSpace->file; file; file = file->fil_next)
-		{
-			PIO_force_write(file,
-				forceWrite && !(header->hdr_flags & hdr_read_only),
-				notUseFSCache);
-		}
-
-		if (dbb->dbb_backup_manager->getState() != Ods::hdr_nbak_normal)
-			dbb->dbb_backup_manager->setForcedWrites(forceWrite, notUseFSCache);
 	}
 
 	if (header->hdr_flags & hdr_no_reserve)
