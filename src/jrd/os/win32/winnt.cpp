@@ -580,7 +580,7 @@ jrd_file* PIO_open(thread_db* tdbb,
 						  FILE_SHARE_READ | FILE_SHARE_WRITE,
 						  NULL,
 						  OPEN_EXISTING,
-						  FILE_ATTRIBUTE_NORMAL
+						  FILE_ATTRIBUTE_NORMAL,
 						  0);
 
 		if (desc == INVALID_HANDLE_VALUE)
