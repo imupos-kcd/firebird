@@ -32,6 +32,8 @@
  * Claudio Valderrama C.
  * Adriano dos Santos Fernandes
  *
+ * 2023.08.16 imupos - Removed force write functionality for read-only
+ *
  */
 
 #include "firebird.h"
@@ -1847,12 +1849,6 @@ JAttachment* JProvider::internalAttach(CheckStatusWrapper* user_status, const ch
 				validateAccess(attachment);
 				PAG_sweep_interval(tdbb, options.dpb_sweep_interval);
 				dbb->dbb_sweep_interval = options.dpb_sweep_interval;
-			}
-
-			if (options.dpb_set_force_write)
-			{
-				validateAccess(attachment);
-				PAG_set_force_write(tdbb, options.dpb_force_write);
 			}
 
 			if (options.dpb_set_no_reserve)
