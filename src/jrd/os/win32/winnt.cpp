@@ -31,6 +31,10 @@
  * 20-Nov-2001 Ann Harrison: Make page count work on db with forced write
  *
  * 21-Nov-2001 Ann Harrison: Allow read sharing so gstat works
+ *
+ * 2023.08.16 imupos - Force to set read-only flag for all access
+ * 2023.08.16 imupos - Diable DBB_force_write flag
+ *
  */
 
 #include "firebird.h"
@@ -552,11 +556,14 @@ jrd_file* PIO_open(thread_db* tdbb,
 	bool readOnly = false;
 	const bool shareMode = dbb->dbb_config->getServerMode() != MODE_SUPER;
 
+	dbb->dbb_flags |= DBB_read_only;
+	dbb->dbb_flags &= ~DBB_force_write;
+	
 	adjustFsCacheOnce.init();
 
 	HANDLE desc = CreateFile(ptr,
-					  GENERIC_READ | GENERIC_WRITE,
-					  getShareFlags(shareMode),
+					  GENERIC_READ,
+					  FILE_SHARE_READ | FILE_SHARE_WRITE | (shareMode ? FILE_SHARE_DELETE : 0),
 					  NULL,
 					  OPEN_EXISTING,
 					  FILE_ATTRIBUTE_NORMAL |
@@ -570,27 +577,28 @@ jrd_file* PIO_open(thread_db* tdbb,
 		// If this fileopen fails, return error.
 		desc = CreateFile(ptr,
 						  GENERIC_READ,
-						  FILE_SHARE_READ,
+						  FILE_SHARE_READ | FILE_SHARE_WRITE,
 						  NULL,
 						  OPEN_EXISTING,
-						  FILE_ATTRIBUTE_NORMAL |
-						  g_dwExtraFlags, 0);
+						  FILE_ATTRIBUTE_NORMAL
+						  0);
 
 		if (desc == INVALID_HANDLE_VALUE)
 		{
 			ERR_post(Arg::Gds(isc_io_error) << Arg::Str("CreateFile (open)") << Arg::Str(file_name) <<
 					 Arg::Gds(isc_io_open_err) << Arg::Windows(GetLastError()));
 		}
-		else
-		{
-			// If this is the primary file, set Database flag to indicate that it is
-			// being opened ReadOnly. This flag will be used later to compare with
-			// the Header Page flag setting to make sure that the database is set ReadOnly.
-			readOnly = true;
-			PageSpace* pageSpace = dbb->dbb_page_manager.findPageSpace(DB_PAGE_SPACE);
-			if (!pageSpace->file)
-				dbb->dbb_flags |= DBB_being_opened_read_only;
-		}
+	}
+
+	if (desc != INVALID_HANDLE_VALUE) 
+	{
+		// If this is the primary file, set Database flag to indicate that it is
+		// being opened ReadOnly. This flag will be used later to compare with
+		// the Header Page flag setting to make sure that the database is set ReadOnly.
+		readOnly = true;
+		PageSpace* pageSpace = dbb->dbb_page_manager.findPageSpace(DB_PAGE_SPACE);
+		if (!pageSpace->file)
+			dbb->dbb_flags |= DBB_being_opened_read_only;
 	}
 
 	return setup_file(dbb, string, desc, readOnly, shareMode);
