@@ -33,6 +33,7 @@
  * Adriano dos Santos Fernandes
  *
  * 2023.08.16 imupos - Removed force write functionality for read-only
+ * 2023.09.07 imupos - Set to require LCK_null lock when initializing DB lock
  *
  */
 
@@ -6356,7 +6357,7 @@ static void init_database_lock(thread_db* tdbb)
 
 		dbb->dbb_flags &= ~DBB_exclusive;
 
-		while (!LCK_lock(tdbb, lock, LCK_SW, -1))
+		while (!LCK_lock(tdbb, lock, LCK_null, -1))
 		{
 			fb_utils::init_status(tdbb->tdbb_status_vector);
 
