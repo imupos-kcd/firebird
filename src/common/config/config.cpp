@@ -18,6 +18,7 @@
  *
  *  All Rights Reserved.
  *  Contributor(s): ______________________________________.
+ * 2023.09.07 imupos - Force Server Mode to Classic
  */
 
 #include "firebird.h"
@@ -702,7 +703,7 @@ int Config::getServerMode()
 	if (rc >= 0)
 		return rc;
 
-	const char* textMode = (const char*) (getDefaultConfig()->values[KEY_SERVER_MODE]);
+	const char* textMode = "Classic";
 	const char* modes[6] =
 		{"Super", "ThreadedDedicated", "SuperClassic", "ThreadedShared", "Classic", "MultiProcess"};
 
